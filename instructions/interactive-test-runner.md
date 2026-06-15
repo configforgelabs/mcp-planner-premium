@@ -15,12 +15,15 @@ prescribed order, record every result as you go, then write a complete markdown 
 
 Ask the user:
 
-1. **Write mode?** — "Should I run the full write lifecycle (creates a test plan in Dataverse)?
+1. **Write mode?** — "Should I run the full write lifecycle (creates a real test plan in Planner Premium)?
    Say YES to run, or NO for read-only."
-2. **Environment** — "What is the Dataverse org URL you're testing against?" (e.g. `https://contoso.crm.dynamics.com`)
 
 Keep a running tally in memory: `PASS`, `FAIL`, `SKIP` counts. Do **not** stop on first failure —
 continue all phases and report everything at the end.
+
+The environment is determined by the MCP server's connection — do **not** ask the user for it.
+Populate the `**Environment:**` field in the report from the `whoami` response (Step 0.2) if it
+includes an org/tenant identifier, otherwise write "derived from MCP server connection".
 
 ---
 
@@ -186,8 +189,8 @@ If the user said NO to write mode, record all steps below as `SKIP (write mode d
 move to Phase 3.
 
 **Naming convention:** use the plan name `ZZ-MCP-TEST-<today's date YYYYMMDD>` so it is clearly
-identifiable as a test plan. The plan cannot be auto-deleted (PSS policy blocks whole-plan deletion)
-— remind the user to remove it manually in the Planner UI after the test.
+identifiable as a test plan. The plan cannot be deleted via the API — remind the user to remove it
+manually in the Planner UI after the test.
 
 ### Step 2.1 — create_plan
 
@@ -271,7 +274,7 @@ session from Step 2.3 disappears from the list.
 
 **Pass criteria:**
 - Eventually `openSets` length = 0 (or the specific session is gone)
-- If still open after 10 polls: record as FAIL with "PSS operation did not complete in time"
+- If still open after 10 polls: record as FAIL with "operation did not complete in time"
 
 ### Step 2.7 — verify via get_plan_tasks_and_buckets
 
@@ -377,7 +380,7 @@ This means:
 
 Send each test to the tool named in the table below. Do not swap them.
 
-Use these placeholder GUIDs throughout Phase 3 (they don't need to exist in Dataverse):
+Use these placeholder GUIDs throughout Phase 3 (they don't need to exist in Planner Premium):
 ```
 FAKE_A = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 FAKE_B = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
@@ -472,7 +475,7 @@ everything.
 # MCP Planner Premium — Interactive Test Report
 
 **Run date:** [today's date and time]
-**Environment:** [Dataverse org URL]
+**Environment:** [Planner Premium environment, from MCP server connection]
 **Tester:** [your model name, e.g. claude-opus-4-8]
 **Write mode:** [YES / NO]
 **User ID (whoami):** [userId returned in Step 0.2]
@@ -576,7 +579,7 @@ everything.
 
 ## Cleanup Notes
 
-[List any test artefacts remaining in Dataverse that the user must remove manually.]
+[List any test artefacts remaining in Planner Premium that the user must remove manually.]
 
 ---
 
