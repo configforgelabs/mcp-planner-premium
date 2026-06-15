@@ -21,19 +21,22 @@ export const getTask: ToolDef = {
     const taskId = assertGuid(input.taskId, "taskId");
     const warnings: string[] = [];
 
-    const BASE_SELECT =
+    // Fields available on all Planner Premium tenants.
+    const CORE_SELECT =
       "msdyn_projecttaskid,msdyn_subject,msdyn_description," +
-      "msdyn_start,msdyn_finish," +
-      "msdyn_progress,msdyn_effort,msdyn_remainingeffort,msdyn_duration," +
+      "msdyn_start,msdyn_finish,msdyn_progress,msdyn_effort," +
       "msdyn_outlinelevel,msdyn_displaysequence,msdyn_ismilestone,msdyn_priority," +
       "_msdyn_projectbucket_value,_msdyn_parenttask_value,_msdyn_projectsprint_value";
+    // Fields that exist only on Project Operations / certain tenant versions.
+    // Gracefully absent on basic Planner Premium tenants.
+    const EXTENDED_FIELDS = "msdyn_remainingeffort,msdyn_duration,msdyn_actualstart,msdyn_actualfinish";
     const EXPAND =
       "&$expand=msdyn_projectbucket($select=msdyn_name),msdyn_parenttask($select=msdyn_subject)";
 
-    // Try with actual-date fields first. Some tenants (Project Operations) have them;
-    // Planner Premium-only tenants don't. On a 400 mentioning those fields, retry
-    // without them and note the degradation.
-    let hasActualDates = true;
+    // Try with extended fields first; on any "Could not find a property" 400,
+    // drop all extended fields and retry with core only. One retry covers any
+    // combination of missing fields without needing per-field probes.
+    let hasExtended = true;
     let taskRes = await dvReq(
       {
         url:
@@ -41,19 +44,20 @@ export const getTask: ToolDef = {
           "/msdyn_projecttasks(" +
           taskId +
           ")?$select=" +
-          BASE_SELECT +
-          ",msdyn_actualstart,msdyn_actualfinish" +
+          CORE_SELECT +
+          "," +
+          EXTENDED_FIELDS +
           EXPAND,
         method: "GET",
         headers: dvHeaders(),
       },
       { retry: true },
     );
-    if (taskRes.status === 400 && /msdyn_actual(start|finish)/i.test(dvErrorMessage(taskRes))) {
-      hasActualDates = false;
+    if (taskRes.status === 400 && /could not find a property named/i.test(dvErrorMessage(taskRes))) {
+      hasExtended = false;
       taskRes = await dvReq(
         {
-          url: BASE + "/msdyn_projecttasks(" + taskId + ")?$select=" + BASE_SELECT + EXPAND,
+          url: BASE + "/msdyn_projecttasks(" + taskId + ")?$select=" + CORE_SELECT + EXPAND,
           method: "GET",
           headers: dvHeaders(),
         },
@@ -140,15 +144,15 @@ export const getTask: ToolDef = {
         description: t.msdyn_description ?? null,
         start: t.msdyn_start ?? null,
         finish: t.msdyn_finish ?? null,
-        ...(hasActualDates && {
+        ...(hasExtended && {
           actualStart: t.msdyn_actualstart ?? null,
           actualFinish: t.msdyn_actualfinish ?? null,
+          remainingEffortHours: t.msdyn_remainingeffort ?? null,
+          durationHours: t.msdyn_duration ?? null,
         }),
         progressPercent:
           typeof t.msdyn_progress === "number" ? Math.round(t.msdyn_progress * 100) : null,
         effortHours: t.msdyn_effort ?? null,
-        remainingEffortHours: t.msdyn_remainingeffort ?? null,
-        durationHours: t.msdyn_duration ?? null,
         outlineLevel: t.msdyn_outlinelevel ?? null,
         displaySequence: t.msdyn_displaysequence ?? null,
         isMilestone: t.msdyn_ismilestone === true,
