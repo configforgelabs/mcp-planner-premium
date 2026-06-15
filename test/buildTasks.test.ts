@@ -200,6 +200,29 @@ describe("buildTaskEntities", () => {
     expect(depEu.msdyn_projecttaskdependencylinktype).toBe(1);             // FS eu
   });
 
+  it("warns when effortHours is set on a summary (parent) task", () => {
+    const tasks: SimpleTask[] = [
+      { ref: "parent", subject: "P", bucket: BUCKET, effortHours: 40 },
+      { ref: "child", subject: "C", bucket: BUCKET, parent: "parent", effortHours: 8 },
+    ];
+    const built = buildTaskEntities(PROJECT, tasks, resolve);
+    // Parent has effortHours — PSS ignores it and rolls up from children.
+    expect(built.warnings).toHaveLength(1);
+    expect(built.warnings[0]).toMatch(/parent/);
+    expect(built.warnings[0]).toMatch(/effortHours.*ignored.*summary/i);
+    // Leaf child has effortHours — no warning about it by its ref name.
+    expect(built.warnings.every((w) => !w.includes("tasks[child]"))).toBe(true);
+  });
+
+  it("emits no warnings when effortHours is only on leaf tasks", () => {
+    const tasks: SimpleTask[] = [
+      { ref: "a", subject: "A", bucket: BUCKET, effortHours: 8 },
+      { ref: "b", subject: "B", bucket: BUCKET, effortHours: 16 },
+    ];
+    const built = buildTaskEntities(PROJECT, tasks, resolve);
+    expect(built.warnings).toHaveLength(0);
+  });
+
   it("rejects duplicate refs and missing required fields", () => {
     expect(() =>
       buildTaskEntities(

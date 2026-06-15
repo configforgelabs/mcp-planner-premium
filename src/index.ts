@@ -17,6 +17,9 @@ const httpServer = app.listen(env.PORT, () => {
       // Shows the auto-derived ACA host; dnsRebindingProtection is on when set.
       allowedHosts: allowedHosts ?? null,
       dnsRebindingProtection: Boolean(allowedHosts),
+      // Verify this matches your tenant — EU/CRM4 needs "eu" (FS=1); global needs "global" (FS=192350000).
+      // Use describe_option_set on msdyn_projecttaskdependency/msdyn_projecttaskdependencylinktype to check.
+      linkTypeStyle: env.DATAVERSE_LINK_TYPE_STYLE,
     },
     "mcp-planner-premium listening",
   );

@@ -64,6 +64,9 @@ export interface BuiltBatch {
    * PSS requires these to be deleted BEFORE their referenced tasks — include
    * them in delete_tasks_batch records when cleaning up. */
   dependencyIds: string[];
+  /** Non-fatal warnings about caller-supplied values that PSS will silently
+   * ignore or override (e.g. effortHours on a summary task). */
+  warnings: string[];
 }
 
 /**
@@ -157,10 +160,14 @@ export function buildTaskEntities(
 
   const ordered = orderParentsFirst(tasks);
 
+  // Identify which refs appear as a parent of another task in this batch.
+  const parentRefs = new Set(tasks.map((t) => t.parent).filter(Boolean) as string[]);
+
   const taskEntities: any[] = [];
   const depEntities: any[] = [];
   const milestoneTaskIds: string[] = [];
   const dependencyIds: string[] = [];
+  const warnings: string[] = [];
 
   for (const t of ordered) {
     const id = refToId[t.ref];
@@ -184,6 +191,18 @@ export function buildTaskEntities(
     // milestone is BLOCKED on create - never put it in the payload; surface it
     // instead so the caller can set it via a follow-up update_tasks_batch.
     if (t.milestone === true) milestoneTaskIds.push(id);
+
+    // PSS ignores effortHours on summary tasks (parent tasks) — it rolls up
+    // effort from leaf children automatically. Warn so the caller is not surprised.
+    if (typeof t.effortHours === "number" && parentRefs.has(t.ref)) {
+      warnings.push(
+        "tasks[" +
+          t.ref +
+          "] (taskId: " +
+          id +
+          "): 'effortHours' was ignored on summary task — PSS computes effort from leaf children automatically.",
+      );
+    }
 
     taskEntities.push(ent);
 
@@ -235,6 +254,7 @@ export function buildTaskEntities(
     refToId,
     milestoneTaskIds,
     dependencyIds,
+    warnings,
   };
 }
 
@@ -393,6 +413,7 @@ export const addTasksSimple: ToolDef = {
       taskRefs: built.refToId,
       milestoneTaskIds: built.milestoneTaskIds,
       dependencyIds: built.dependencyIds,
+      warnings: built.warnings.length > 0 ? built.warnings : undefined,
       response: response.json || {},
       note:
         built.milestoneTaskIds.length > 0

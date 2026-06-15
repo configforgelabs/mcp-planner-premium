@@ -229,8 +229,9 @@ export const deleteTasks: ToolDef = {
     }
 
     const records: { entityLogicalName: string; recordId: string }[] = [];
-    for (const id of taskIdList)
-      records.push({ entityLogicalName: "msdyn_projecttask", recordId: id });
+    // Non-task records (dependencies, assignments, etc.) must come BEFORE task
+    // records — PSS rejects task deletion if a dependency entity still references
+    // the task, returning E_INVALIDENTITYUID mid-batch.
     if (input.records !== undefined && input.records !== null) {
       const raw = asArray<{ entityLogicalName: string; recordId: string }>(
         input.records,
@@ -238,6 +239,8 @@ export const deleteTasks: ToolDef = {
       );
       for (const r of raw) records.push(r);
     }
+    for (const id of taskIdList)
+      records.push({ entityLogicalName: "msdyn_projecttask", recordId: id });
     if (records.length === 0)
       throw new Error("Provide taskIds (task GUIDs) and/or records to delete.");
     validateDeleteRecords(records);

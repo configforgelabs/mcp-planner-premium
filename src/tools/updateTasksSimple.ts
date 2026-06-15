@@ -19,6 +19,9 @@ export interface SimpleTaskUpdate {
   priority?: number;
   /** Bucket name (resolved against the plan) or a bucketId GUID. Requires projectId. */
   bucket?: string;
+  /** Reparent (move under another task): an EXISTING task GUID. update has no
+   * in-batch refs, so a name or ref is not accepted here. */
+  parent?: string;
 }
 
 export interface BuiltUpdate {
@@ -117,6 +120,36 @@ export function buildUpdateEntities(
       ent["msdyn_projectbucket@odata.bind"] = "/msdyn_projectbuckets(" + bucketId + ")";
       changed++;
     }
+    if (t.parent !== undefined) {
+      // Reparent: move the task under another EXISTING task. Unlike add_tasks,
+      // update has no in-batch refs, so parent must be a persisted task GUID.
+      // The new parent becomes a summary task — validateUpdateEntities already
+      // scans msdyn_parenttask@odata.bind targets into its summary set, so any
+      // rolled-up-field write on that parent in the same batch stays blocked.
+      if (t.parent === null) {
+        // Un-parenting (move to top level) is not supported: PSS rejects a null
+        // parent bind. Drop with a warning rather than failing the whole batch.
+        warnings.push(
+          "tasks[" +
+            i +
+            "] (" +
+            id +
+            "): parent=null skipped — moving a task to the top level (un-parenting) is not supported via the API (PSS rejects null parent binds). Reparent under another task, or restructure in the Planner UI.",
+        );
+      } else {
+        const p = String(t.parent).trim();
+        if (!GUID_RE.test(p))
+          throw new Error(
+            "tasks[" +
+              i +
+              "]: parent must be an existing task GUID (update_tasks has no in-batch refs like add_tasks). Got '" +
+              p +
+              "'.",
+          );
+        ent["msdyn_parenttask@odata.bind"] = "/msdyn_projecttasks(" + p + ")";
+        changed++;
+      }
+    }
     if (changed === 0)
       throw new Error(
         "tasks[" +
@@ -157,6 +190,12 @@ const updateSchema = z.object({
     .describe(
       "Move task to a different bucket: bucket NAME (resolved against the plan) or a bucketId GUID. Requires projectId at the top level.",
     ),
+  parent: z
+    .string()
+    .optional()
+    .describe(
+      "Reparent the task: move it under another EXISTING task by its GUID (msdyn_projecttaskid). Unlike add_tasks, no in-batch refs or names — pass a persisted task GUID. Moving a task to the top level (un-parenting) is NOT supported and is ignored with a warning. Invalid moves (e.g. a cycle) are rejected by the scheduling engine on apply.",
+    ),
 });
 
 // Ergonomic update - the model sends a plain list keyed by taskId; the server
@@ -165,7 +204,7 @@ export const updateTasksSimple: ToolDef = {
   name: "update_tasks",
   title: "Update Tasks in Plan",
   description:
-    "Updates existing tasks from a SIMPLE list - you pass taskId plus only the fields to change (subject, description, start, finish, effortHours, progressPercent 0-100, priority, bucket); the server builds the Dataverse payload. Pass projectId to enable two automatic behaviours: (1) bucket names are resolved to IDs, and (2) the plan's task hierarchy is fetched so summary (parent) tasks are protected automatically — you do NOT need a separate get_plan_tasks_and_buckets call when projectId is provided. Without projectId the summary-task guard only fires if you pass explicit summaryTaskIds. Dependencies cannot be updated (delete and recreate). The milestone flag CANNOT be set via this API - passing milestone returns a warning and is ignored. Get explicit user approval before queuing schedule changes. Saved only after 'Apply Changes to Plan'. For raw OData field control use the advanced update_tasks_batch.",
+    "Updates existing tasks from a SIMPLE list - you pass taskId plus only the fields to change (subject, description, start, finish, effortHours, progressPercent 0-100, priority, bucket, parent); the server builds the Dataverse payload. Move a task to another bucket with 'bucket', or reparent it under another existing task with 'parent' (an existing task GUID). Pass projectId to enable two automatic behaviours: (1) bucket names are resolved to IDs, and (2) the plan's task hierarchy is fetched so summary (parent) tasks are protected automatically — you do NOT need a separate get_plan_tasks_and_buckets call when projectId is provided. Without projectId the summary-task guard only fires if you pass explicit summaryTaskIds. Dependencies cannot be updated (delete and recreate). The milestone flag CANNOT be set via this API - passing milestone returns a warning and is ignored. Un-parenting (moving a task to the top level) is not supported and is ignored with a warning. Get explicit user approval before queuing schedule changes. Saved only after 'Apply Changes to Plan'. For raw OData field control use the advanced update_tasks_batch.",
   inputSchema: {
     operationSetId: z
       .string()

@@ -18,20 +18,21 @@ Ask the user **both** questions before calling any tool:
 1. **Which phases?** — "Which phases should I run? Reply with a comma list:
    - `0` — Preflight (whoami + tool inventory) — always recommended
    - `1` — Read sweep (all 10 read tools, no writes)
-   - `2` — Write lifecycle (creates a real test plan with 3 buckets and 10 tasks, verifies all attributes, cleans up)
+   - `2` — Write lifecycle (creates a real test plan with 3 buckets and 10 tasks, verifies all attributes, then exercises updates, bucket-move, reparent, summary-task protection, single-delete and session-cancel, and cleans up)
    - `3` — Guardrail tests (13 negative-path tests, no real data needed)
    
    Examples: `0,1,2,3` (full run), `0,1` (read-only), `3` (guardrails only), `0,1,2` (write but skip guardrails)"
 
-2. **Write mode (only if Phase 2 is selected)** — "Phase 2 creates a test plan, 3 buckets, and 10 tasks with rich attributes, then cleans everything up. Confirm YES to proceed, or NO to skip Phase 2."
+2. **Write mode (only if Phase 2 is selected)** — "Phase 2 creates a test plan, 3 buckets, and 10 tasks with rich attributes, then runs a full change lifecycle over them (updates, bucket-move, reparent, summary-task protection, single-delete, session-cancel) and cleans everything up. Confirm YES to proceed, or NO to skip Phase 2."
 
 Keep a running tally in memory: `PASS`, `FAIL`, `SKIP` counts. Do **not** stop on first failure —
 continue all selected phases and report everything at the end.
 
-> **Mind the tool-call budget.** A full run (Phases 0-3) makes ~70+ tool calls. If you notice
-> you are running low on budget mid-Phase 2, finish Phase 2 cleanup first, then start a fresh
-> session for Phase 3 (it is self-contained and needs no real data). When you split, mark the
-> skipped steps as `SKIP (run separately)`, not silent gaps.
+> **Mind the tool-call budget.** A full run (Phases 0-3) makes ~95+ tool calls (Phase 2's
+> update/move/reparent/delete/cancel lifecycle adds several apply+poll+verify cycles). If you
+> notice you are running low on budget mid-Phase 2, finish Phase 2 cleanup first (Step 2.17),
+> then start a fresh session for Phase 3 (it is self-contained and needs no real data). When you
+> split, mark the skipped steps as `SKIP (run separately)`, not silent gaps.
 
 The environment is determined by the MCP server's connection — do **not** ask the user for it.
 Populate the `**Environment:**` field in the report from the `whoami` response (Step 0.2) if it
@@ -364,6 +365,7 @@ priority, and dependencies across roots. All attributes are set on the ergonomic
 - `ok` is `true`
 - `taskRefs` has 10 keys: `R1`, `R1A`, `R1A1`, `R1A2`, `R1B`, `R1B1`, `R2`, `R2A`, `R2A1`, `R2B`
 - `dependencyIds` is an array with **2 GUIDs** (one per FS dependency: R1A1→R1A2, R1B1→R2A1)
+- `warnings` is an array containing entries for **R1A** and **R2A** — PSS ignores `effortHours` on summary (parent) tasks and the server now surfaces this as a warning. **FAIL** if `warnings` is absent or empty when effortHours was set on those refs.
 
 Save all 10 task IDs as `CREATED_TASK_IDS`. Save `dependencyIds` (2 GUIDs) as `CREATED_DEP_IDS`.
 Save `taskRefs.R1A` as `VERIFY_TASK_R1A`. Save `taskRefs.R2A1` as `VERIFY_TASK_R2A1`.
@@ -404,11 +406,10 @@ Save `summaryTaskIds` as `SUMMARY_IDS`.
 **Pass criteria — check every attribute set in Step 2.4:**
 - `task.subject` is `"Stakeholder Alignment"`
 - `task.bucketName` is `"Planning"` — bucket name resolved correctly
-- `task.effortHours` is `16`
+- `task.effortHours` is `0` — **not** 16. R1A is a summary task; PSS ignores the caller-supplied value and rolls up effort from leaf children (R1A1 and R1A2 have no effortHours, so the rollup is 0). The `warnings` in Step 2.4 covered this. Record as FAIL only if effortHours is non-zero and unexpected.
 - `task.description` is `"Align all key stakeholders before kick-off"`
 - `task.priority` is `2`
-- `task.start` contains `"2026-09-01"` (may include time component)
-- `task.finish` contains `"2026-09-05"`
+- `task.start` and `task.finish` — **PSS clamps task dates to the plan's active range.** If the plan was created with no explicit dates (Step 2.1 default), the dates will be normalised to the plan's current range rather than the supplied September values. Record the actual values; mark as PASS with NOTE "dates clamped by PSS" if they differ from `"2026-09-01"` / `"2026-09-05"`. To prevent clamping, update the plan's `msdyn_start`/`msdyn_finish` to cover the full task date range before adding tasks.
 - `task.isSummary` is `true` (R1A has children R1A1 and R1A2)
 - `task.parentTaskSubject` is `"Programme Kick-off"` — parent name resolved
 
@@ -506,7 +507,249 @@ Call: `apply_changes` with `{ "operationSetId": "<OP_SET_2>" }`
 
 ---
 
-### Step 2.11 — cleanup (delete all tasks and dependency entities)
+### Step 2.11 — note (description) round-trip fidelity
+
+Adds a rich task note and reads it back verbatim. Descriptions are set/read on the create
+path (Steps 2.4, 2.7b/2.7c) and update path (Steps 2.8, 2.10a) already, but only with plain
+ASCII. This step stresses the field with multiline text, unicode and special characters — the
+content most likely to be mangled or truncated by OData/PSS encoding.
+
+Open a session:
+
+Call: `start_change_session` with `{ "projectId": "<NEW_PROJECT_ID>", "description": "E2E note round-trip" }`
+Save as `OP_SET_NOTE`.
+
+Call `update_tasks` (a description-only edit on a leaf needs no projectId — it is a pure text change):
+
+```json
+{
+  "operationSetId": "<OP_SET_NOTE>",
+  "tasks": [
+    {
+      "taskId": "<taskRefs.R2A1>",
+      "description": "Meeting notes:\n- Budget approved (€50k) at 50% margin\n- Risks: \"vendor lock-in\" & data-residency\n- Owner: José; follow-up <2 weeks>\nPath: C:\\plans\\Q3"
+    }
+  ]
+}
+```
+
+**Pass criteria (queue):** `ok` is `true`.
+
+Call: `apply_changes` with `{ "operationSetId": "<OP_SET_NOTE>" }`. Wait ~10 s.
+
+**Verify** — call `get_task` with `{ "taskId": "<taskRefs.R2A1>" }`:
+- `task.description` equals the note **character-for-character**, including the newlines, the
+  euro sign, the accented `é`, and the `"` `&` `<>` `;` `\` characters.
+
+> **Line-ending tolerance:** if the only difference is `\r\n` vs `\n` (Dataverse may normalise
+> line endings), record as PASS with a NOTE. A FAIL is any dropped, truncated, double-escaped or
+> substituted character (e.g. `&amp;` instead of `&`, or a missing `€`).
+
+---
+
+### Step 2.12 — move a task to a different bucket + change a leaf schedule field
+
+Exercises the bucket-move path and a successful schedule-field write on a leaf task
+(both distinct from the rename/progress edits in Step 2.8).
+
+Open a session:
+
+Call: `start_change_session` with `{ "projectId": "<NEW_PROJECT_ID>", "description": "E2E move + effort" }`
+Save as `OP_SET_3`.
+
+Call `update_tasks` with **projectId** (required for bucket-name resolution and summary protection):
+
+```json
+{
+  "operationSetId": "<OP_SET_3>",
+  "projectId": "<NEW_PROJECT_ID>",
+  "tasks": [
+    {
+      "taskId": "<taskRefs.R2B>",
+      "bucket": "Planning",
+      "effortHours": 12
+    }
+  ]
+}
+```
+
+**Pass criteria:** `ok` is `true`. (R2B is a leaf, so the effort write is valid; `bucket` is resolved by name because projectId was supplied.)
+
+Call: `apply_changes` with `{ "operationSetId": "<OP_SET_3>" }`. Wait ~10 s.
+
+**Verify** — call `get_task` with `{ "taskId": "<taskRefs.R2B>" }`:
+- `task.bucketName` is `"Planning"` — task moved from Testing to Planning
+- `task.effortHours` is `12` — effort persisted on the leaf (effort is NOT rolled up on a leaf, so the value is kept exactly)
+
+---
+
+### Step 2.13 — reparent 2 tasks under different parents AND change their values
+
+Exercises the `parent` field on `update_tasks` (reparent) combined with value changes
+in one batch. Moves two leaf tasks under new parents and updates their fields.
+
+Open a session:
+
+Call: `start_change_session` with `{ "projectId": "<NEW_PROJECT_ID>", "description": "E2E reparent" }`
+Save as `OP_SET_4`.
+
+Call `update_tasks` with **projectId** (enables summary-task protection — the new parents
+are auto-guarded):
+
+```json
+{
+  "operationSetId": "<OP_SET_4>",
+  "projectId": "<NEW_PROJECT_ID>",
+  "tasks": [
+    {
+      "taskId": "<taskRefs.R1A2>",
+      "parent": "<taskRefs.R1B>",
+      "progressPercent": 25,
+      "description": "Moved under Technical Setup"
+    },
+    {
+      "taskId": "<taskRefs.R1B1>",
+      "parent": "<taskRefs.R2A>",
+      "effortHours": 6,
+      "description": "Moved under Development Sprint"
+    }
+  ]
+}
+```
+
+`R1A2` and `R1B1` are leaves, so their value changes are valid; `R1B`/`R2A` (the new parents)
+are summary tasks and the server guards them automatically.
+
+**Pass criteria:** `ok` is `true`.
+
+> If PSS rejects a combined reparent + field change in one entity (uncommon), split into two
+> sessions — reparent first, then the value change — and record as PASS with a NOTE. A hard
+> FAIL is only when the reparent itself is rejected for a non-cycle reason.
+
+Call: `apply_changes` with `{ "operationSetId": "<OP_SET_4>" }`. Wait ~10 s.
+
+**Verify R1A2** — call `get_task` with `{ "taskId": "<taskRefs.R1A2>" }`:
+- `task.parentTaskSubject` is `"Technical Setup"` — reparented under R1B
+- `task.progressPercent` is `25`
+- `task.description` is `"Moved under Technical Setup"`
+
+**Verify R1B1** — call `get_task` with `{ "taskId": "<taskRefs.R1B1>" }`:
+- `task.parentTaskSubject` is `"Development Sprint"` — reparented under R2A
+- `task.effortHours` is `6`
+- `task.description` is `"Moved under Development Sprint"`
+
+---
+
+### Step 2.14 — summary-task protection fires on real data (negative)
+
+Confirms the most important safety guardrail with a live hierarchy: writing a rolled-up
+field (start/finish/effort) on a summary (parent) task must be **rejected**. This passes
+when the tool returns an error.
+
+Open a session:
+
+Call: `start_change_session` with `{ "projectId": "<NEW_PROJECT_ID>", "description": "E2E summary guard" }`
+Save as `OP_SET_5`.
+
+Call `update_tasks` with **projectId** (so the server auto-detects summary tasks):
+
+```json
+{
+  "operationSetId": "<OP_SET_5>",
+  "projectId": "<NEW_PROJECT_ID>",
+  "tasks": [
+    {
+      "taskId": "<taskRefs.R1>",
+      "effortHours": 99,
+      "finish": "2026-12-31"
+    }
+  ]
+}
+```
+
+`R1` (Programme Kick-off) is a top-level summary task — it has children, so effort/finish roll
+up from them.
+
+**Pass criteria (guardrail FIRES):**
+- The call returns an **error** mentioning "summary" / "roll up from its children".
+- **FAIL** if it returns `ok: true` (the guard did not fire).
+
+No `apply_changes` — the call is rejected before anything is queued. Cancel the empty session:
+call `cancel_change_session` with `{ "operationSetId": "<OP_SET_5>" }`.
+
+---
+
+### Step 2.15 — delete a single task (partial delete)
+
+Deletes ONE leaf task and confirms the rest of the plan survives — distinct from the
+full cleanup in the final step.
+
+Open a session:
+
+Call: `start_change_session` with `{ "projectId": "<NEW_PROJECT_ID>", "description": "E2E single delete" }`
+Save as `OP_SET_6`.
+
+Call `delete_tasks_batch` (R2B is a leaf with no dependency entities referencing it):
+
+```json
+{
+  "operationSetId": "<OP_SET_6>",
+  "projectId": "<NEW_PROJECT_ID>",
+  "taskIds": ["<taskRefs.R2B>"],
+  "confirmed": true
+}
+```
+
+Call: `apply_changes` with `{ "operationSetId": "<OP_SET_6>" }`. Wait ~10 s.
+
+**Verify** — call `get_plan_tasks_and_buckets` with `{ "projectId": "<NEW_PROJECT_ID>" }`. Retry up to 3 × 5 s.
+
+**Pass criteria:**
+- `taskCount` is `9` (was 10; R2B removed)
+- No task in the result has `taskId` equal to `taskRefs.R2B`
+- The other 9 task IDs are all still present (the single delete did not cascade)
+
+Remove `R2B` from your `CREATED_TASK_IDS` list — it is already gone, so the final cleanup
+must delete the **remaining 9** tasks, not 10.
+
+---
+
+### Step 2.16 — cancel a change session (rollback before save)
+
+Confirms an unsaved session can be abandoned and that its queued change does NOT persist.
+
+Open a session:
+
+Call: `start_change_session` with `{ "projectId": "<NEW_PROJECT_ID>", "description": "E2E cancel" }`
+Save as `OP_SET_7`.
+
+Queue a harmless rename — call `update_tasks`:
+
+```json
+{
+  "operationSetId": "<OP_SET_7>",
+  "projectId": "<NEW_PROJECT_ID>",
+  "tasks": [
+    { "taskId": "<taskRefs.R1>", "description": "THIS SHOULD NEVER PERSIST" }
+  ]
+}
+```
+
+**Pass criteria (queue):** `ok` is `true`.
+
+Now cancel instead of applying — call `cancel_change_session` with `{ "operationSetId": "<OP_SET_7>" }`.
+
+**Pass criteria (cancel):** `ok` is `true`.
+
+**Verify abandoned** — call `check_change_session_status` with `{ "operationSetId": "<OP_SET_7>" }`:
+- `statusCode` is `192350004` and `status` is `"Abandoned"`
+
+**Verify NOT persisted** — call `get_task` with `{ "taskId": "<taskRefs.R1>" }`:
+- `task.description` is **NOT** `"THIS SHOULD NEVER PERSIST"` (the queued change was discarded by the cancel)
+
+---
+
+### Step 2.17 — cleanup (delete remaining tasks and dependency entities)
 
 Open cleanup session:
 
@@ -515,13 +758,14 @@ Open cleanup session:
 ```
 Save as `OP_SET_CLEAN`.
 
-Call `delete_tasks_batch`:
+Call `delete_tasks_batch` — `<REMAINING_TASK_IDS>` is `CREATED_TASK_IDS` **minus R2B** (9 tasks,
+since R2B was already deleted in Step 2.15):
 
 ```json
 {
   "operationSetId": "<OP_SET_CLEAN>",
   "projectId": "<NEW_PROJECT_ID>",
-  "taskIds": <CREATED_TASK_IDS>,
+  "taskIds": <REMAINING_TASK_IDS>,
   "records": [
     { "entityLogicalName": "msdyn_projecttaskdependency", "recordId": "<CREATED_DEP_IDS[0]>" },
     { "entityLogicalName": "msdyn_projecttaskdependency", "recordId": "<CREATED_DEP_IDS[1]>" }
@@ -535,9 +779,9 @@ Call: `apply_changes` with `{ "operationSetId": "<OP_SET_CLEAN>" }`
 **Pass criteria:**
 - Both `delete_tasks_batch` and `apply_changes` return `ok: true`
 
-> **Dependency records must come first** in `records` — PSS rejects task deletion if a dependency
-> entity still references it (`E_INVALIDENTITYUID`). `projectId` also triggers auto-sort so tasks
-> are deleted leaves-first automatically.
+> Pass dependency records via `records` (not `taskIds`) — the server now automatically places
+> `records` entries **before** task deletes in the batch so PSS sees them first, preventing
+> `E_INVALIDENTITYUID`. `projectId` also triggers auto-sort so tasks are deleted leaves-first.
 
 **Verify cleanup:** Call `get_plan_tasks_and_buckets` with `{ "projectId": "<NEW_PROJECT_ID>" }`. Retry up to 3 × 5 s.
 
@@ -734,11 +978,11 @@ everything.
 | 2.2b | add_bucket: Development | `add_bucket` | [✅/❌] | bucketId=[value] |
 | 2.2c | add_bucket: Testing | `add_bucket` | [✅/❌] | bucketId=[value] |
 | 2.3 | start_change_session | `start_change_session` | [✅/❌] | operationSetId=[value] |
-| 2.4 | add_tasks (10 tasks, 3 buckets, 2 deps) | `add_tasks` | [✅/❌] | taskRefs=[R1..R2B], depIds=2 |
+| 2.4 | add_tasks (10 tasks, 3 buckets, 2 deps) | `add_tasks` | [✅/❌] | taskRefs=[R1..R2B], depIds=2, warnings=[R1A\|R2A summary effort ignored] |
 | 2.5 | apply_changes | `apply_changes` | [✅/❌] | — |
 | 2.6 | poll for completion | `check_change_session_status` | [✅/❌] | [N] polls needed |
 | 2.7a | verify task count | `get_plan_tasks_and_buckets` | [✅/❌] | taskCount=10, summaryIds=[N] |
-| 2.7b | verify R1A attributes | `get_task` | [✅/❌] | bucketName=Planning, effortHours=16, isSummary=true, parentSubject correct |
+| 2.7b | verify R1A attributes | `get_task` | [✅/❌] | bucketName=Planning, effortHours=0 (summary — PSS rolls up), isSummary=true, parentSubject correct, dates=[actual — may be clamped to plan range] |
 | 2.7c | verify R2A1 dependency | `get_task` | [✅/❌] | predecessors=[R1B1], description correct |
 | 2.7d | verify dependencies | `list_dependencies` | [✅/❌/⏭️NOTE] | count=2 or env-limitation note |
 | 2.8 | update_tasks (progress+desc; milestone drop) | `update_tasks` | [✅/❌] | warnings=[milestone ignored] |
@@ -746,7 +990,13 @@ everything.
 | 2.10a | verify R1A1 update | `get_task` | [✅/❌] | subject=done, progress=100, desc updated |
 | 2.10b | verify R1B1 update | `get_task` | [✅/❌] | progress=50, isMilestone=false |
 | 2.10c | verify R2B update | `get_task` | [✅/❌] | desc set, priority=1 |
-| 2.11 | cleanup (10 tasks + 2 dep entities) | `delete_tasks_batch` | [✅/❌] | taskCount=0 after verify |
+| 2.11 | note round-trip fidelity | `update_tasks` → `get_task` | [✅/❌] | R2A1 description returns verbatim (multiline/unicode/special chars) |
+| 2.12 | move bucket + leaf effort change | `update_tasks` | [✅/❌] | R2B bucketName=Planning, effortHours=12 |
+| 2.13 | reparent 2 tasks + change values | `update_tasks` | [✅/❌] | R1A2→Technical Setup, R1B1→Development Sprint, values applied |
+| 2.14 | summary-task protection (negative) | `update_tasks` | [✅ fired / ❌] | rejected on R1 with "roll up"/"summary" |
+| 2.15 | delete a single task | `delete_tasks_batch` | [✅/❌] | taskCount=9, R2B gone, others survive |
+| 2.16 | cancel change session | `cancel_change_session` | [✅/❌] | status=Abandoned (192350004), change not persisted |
+| 2.17 | cleanup (remaining 9 tasks + 2 dep entities) | `delete_tasks_batch` | [✅/❌] | taskCount=0 after verify |
 
 **Residue:** Plan `ZZ-MCP-TEST-<date>` (id: [projectId]) remains — 3 buckets + plan need manual removal in Planner UI.
 

@@ -114,4 +114,60 @@ describe("buildUpdateEntities", () => {
     expect(entities[0].msdyn_finish).toBe("2026-07-05");
     expect(warnings).toHaveLength(0);
   });
+
+  it("reparents via msdyn_parenttask@odata.bind when parent is an existing GUID", () => {
+    const NEW_PARENT = "99999999-8888-7777-6666-555555555555";
+    const { entities, warnings } = buildUpdateEntities([
+      { taskId: ID, parent: NEW_PARENT },
+    ]);
+    expect(entities[0]["msdyn_parenttask@odata.bind"]).toBe(
+      "/msdyn_projecttasks(" + NEW_PARENT + ")",
+    );
+    expect(warnings).toHaveLength(0);
+  });
+
+  it("reparent counts as a change, so a parent-only update is accepted", () => {
+    const NEW_PARENT = "99999999-8888-7777-6666-555555555555";
+    expect(() => buildUpdateEntities([{ taskId: ID, parent: NEW_PARENT }])).not.toThrow();
+  });
+
+  it("reparent and other field changes can be combined in one entity", () => {
+    const NEW_PARENT = "99999999-8888-7777-6666-555555555555";
+    const { entities } = buildUpdateEntities([
+      { taskId: ID, parent: NEW_PARENT, effortHours: 12, progressPercent: 25 },
+    ]);
+    expect(entities[0]["msdyn_parenttask@odata.bind"]).toBe(
+      "/msdyn_projecttasks(" + NEW_PARENT + ")",
+    );
+    expect(entities[0].msdyn_effort).toBe(12);
+    expect(entities[0].msdyn_progress).toBe(0.25);
+  });
+
+  it("rejects a non-GUID parent (no in-batch refs like add_tasks)", () => {
+    expect(() => buildUpdateEntities([{ taskId: ID, parent: "some-ref" }])).toThrow(
+      /parent must be an existing task GUID/,
+    );
+  });
+
+  it("skips parent=null (un-parenting) with a warning instead of emitting a null bind", () => {
+    const { entities, warnings } = buildUpdateEntities([
+      { taskId: ID, subject: "Keep", parent: null as any },
+    ]);
+    expect("msdyn_parenttask@odata.bind" in entities[0]).toBe(false);
+    expect(entities[0].msdyn_subject).toBe("Keep");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/un-parenting|parent=null skipped/i);
+  });
+
+  it("the new parent is auto-added to the summary-task guard set (rolled-up writes on it stay blocked)", () => {
+    const CHILD = ID;
+    const NEW_PARENT = "99999999-8888-7777-6666-555555555555";
+    // Same batch: move CHILD under NEW_PARENT, and try to set effort on NEW_PARENT.
+    // The parent bind makes NEW_PARENT a summary task, so its effort write must reject.
+    const { entities } = buildUpdateEntities([
+      { taskId: CHILD, parent: NEW_PARENT },
+      { taskId: NEW_PARENT, effortHours: 40 },
+    ]);
+    expect(() => validateUpdateEntities(entities)).toThrow(/roll up from its children/);
+  });
 });
