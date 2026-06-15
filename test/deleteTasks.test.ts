@@ -100,6 +100,24 @@ describe("sortTaskIdsLeavesFirst", () => {
   it("returns single-element arrays unchanged", () => {
     expect(sortTaskIdsLeavesFirst([L1], parentMap)).toEqual([L1]);
   });
+
+  it("handles a 200-level deep chain without stack overflow (iterative DFS)", () => {
+    const DEPTH = 200;
+    const ids = Array.from({ length: DEPTH }, (_, i) =>
+      String(i).padStart(8, "0") + "-0000-0000-0000-000000000000",
+    );
+    const deepMap = new Map<string, string | null>();
+    deepMap.set(ids[0].toLowerCase(), null);
+    for (let i = 1; i < DEPTH; i++) {
+      deepMap.set(ids[i].toLowerCase(), ids[i - 1].toLowerCase());
+    }
+    const sorted = sortTaskIdsLeavesFirst([...ids], deepMap);
+    expect(sorted).toHaveLength(DEPTH);
+    // The deepest node (last in the chain) must appear first.
+    expect(sorted[0].toLowerCase()).toBe(ids[DEPTH - 1].toLowerCase());
+    // The root must appear last.
+    expect(sorted[DEPTH - 1].toLowerCase()).toBe(ids[0].toLowerCase());
+  });
 });
 
 describe("validateDeleteRecords", () => {

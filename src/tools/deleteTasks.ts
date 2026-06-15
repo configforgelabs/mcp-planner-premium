@@ -57,23 +57,47 @@ export function sortTaskIdsLeavesFirst(
     }
   }
 
-  // Post-order DFS: visit all children before the node itself → leaves first.
+  // Iterative post-order DFS: visit all children before the node itself → leaves
+  // first. Iterative (not recursive) so there is no call-stack depth limit — works
+  // at any hierarchy depth up to Planner Premium's maximum.
   const result: string[] = [];
   const visited = new Set<string>();
 
-  const visit = (id: string): void => {
-    const lo = id.toLowerCase();
-    if (visited.has(lo)) return;
-    visited.add(lo);
-    for (const child of childrenOf.get(lo) ?? []) visit(child);
-    result.push(id);
+  const visitIterative = (rootId: string): void => {
+    // Stack holds [nodeId, childrenIterator]. We push a node, process its
+    // children, then emit the node itself — achieving post-order without recursion.
+    const stack: Array<{ id: string; childIdx: number }> = [];
+    const lo0 = rootId.toLowerCase();
+    if (visited.has(lo0)) return;
+    stack.push({ id: rootId, childIdx: 0 });
+
+    while (stack.length > 0) {
+      const top = stack[stack.length - 1];
+      const lo = top.id.toLowerCase();
+      const children = childrenOf.get(lo) ?? [];
+
+      if (top.childIdx < children.length) {
+        // Process next child.
+        const childId = children[top.childIdx++];
+        if (!visited.has(childId)) {
+          stack.push({ id: childId, childIdx: 0 });
+        }
+      } else {
+        // All children processed — emit this node.
+        stack.pop();
+        if (!visited.has(lo)) {
+          visited.add(lo);
+          result.push(top.id);
+        }
+      }
+    }
   };
 
   // Start from roots (no parent inside the delete set).
   for (const id of taskIds) {
     const lo = id.toLowerCase();
     const parentId = parentMap.get(lo);
-    if (!parentId || !deleteSet.has(parentId)) visit(id);
+    if (!parentId || !deleteSet.has(parentId)) visitIterative(id);
   }
   // Catch anything not yet reached (disconnected / missing from parentMap).
   for (const id of taskIds) {
@@ -183,7 +207,7 @@ export const deleteTasks: ToolDef = {
             "/msdyn_projecttasks?$select=msdyn_projecttaskid,_msdyn_parenttask_value" +
             "&$filter=_msdyn_project_value eq " +
             projectId +
-            "&$top=1000",
+            "&$top=1500",
           method: "GET",
           headers: dvHeaders(),
         },
