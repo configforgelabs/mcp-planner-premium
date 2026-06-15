@@ -161,7 +161,7 @@ export const updateTasksSimple: ToolDef = {
   name: "update_tasks",
   title: "Update Tasks in Plan",
   description:
-    "Updates existing tasks from a SIMPLE list - you pass taskId plus only the fields to change (subject, description, start, finish, effortHours, progressPercent 0-100, priority, bucket); the server builds the Dataverse payload. To move tasks between buckets pass bucket (name or GUID) and projectId. Requires an open change session. NEVER change start/finish/effort/progress on summary (parent) tasks - fetch get_plan_tasks_and_buckets first and pass its summaryTaskIds so such writes are rejected (renames/descriptions on summary tasks are fine). Dependencies cannot be updated (delete and recreate). The milestone flag CANNOT be set via this API (the scheduling engine rejects msdyn_ismilestone on create and update and auto-manages it) - passing milestone returns a warning and is ignored; set milestones in the Planner UI. Get explicit user approval before queuing schedule changes. Saved only after 'Apply Changes to Plan'. For raw OData field control use the advanced update_tasks_batch.",
+    "Updates existing tasks from a SIMPLE list - you pass taskId plus only the fields to change (subject, description, start, finish, effortHours, progressPercent 0-100, priority, bucket); the server builds the Dataverse payload. Pass projectId to enable two automatic behaviours: (1) bucket names are resolved to IDs, and (2) the plan's task hierarchy is fetched so summary (parent) tasks are protected automatically — you do NOT need a separate get_plan_tasks_and_buckets call when projectId is provided. Without projectId the summary-task guard only fires if you pass explicit summaryTaskIds. Dependencies cannot be updated (delete and recreate). The milestone flag CANNOT be set via this API - passing milestone returns a warning and is ignored. Get explicit user approval before queuing schedule changes. Saved only after 'Apply Changes to Plan'. For raw OData field control use the advanced update_tasks_batch.",
   inputSchema: {
     operationSetId: z
       .string()
@@ -173,13 +173,13 @@ export const updateTasksSimple: ToolDef = {
       .string()
       .optional()
       .describe(
-        "GUID of the plan — required when any task update includes a 'bucket' name (used to resolve the name to a bucketId). Not needed for other field updates.",
+        "GUID of the plan. When provided, the server auto-fetches the task hierarchy and automatically protects summary (parent) tasks from invalid schedule-field writes — no separate get_plan_tasks_and_buckets call needed. Also required when any task update includes a 'bucket' name. Strongly recommended whenever updating start/finish/effort/progress.",
       ),
     summaryTaskIds: z
       .union([z.string(), z.array(z.string())])
       .optional()
       .describe(
-        "Optional JSON array of summary-task GUIDs from get_plan_tasks_and_buckets. If provided, rolled-up-field writes (start/finish/effort/progress/duration) on those tasks are rejected.",
+        "Optional JSON array of summary-task GUIDs from get_plan_tasks_and_buckets. Merged with auto-detected summary tasks when projectId is provided. If both are omitted, the summary-task guard does not fire.",
       ),
   },
   handler: async (input: {
@@ -250,8 +250,41 @@ export const updateTasksSimple: ToolDef = {
 
     const { entities, warnings } = buildUpdateEntities(tasks, resolvedBucketIds);
 
+    // Auto-detect summary tasks from the plan hierarchy when projectId is provided.
+    // This lets the guard fire without requiring a prior get_plan_tasks_and_buckets
+    // call — the same projectId used for bucket resolution doubles here.
+    let effectiveSummaryIds: unknown = input.summaryTaskIds;
+    if (input.projectId) {
+      const projId = assertGuid(String(input.projectId), "projectId");
+      const hierRes = await dvReq(
+        {
+          url:
+            BASE +
+            "/msdyn_projecttasks?$select=msdyn_projecttaskid,_msdyn_parenttask_value" +
+            "&$filter=_msdyn_project_value eq " +
+            projId +
+            "&$top=1500",
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      if (hierRes.status < 400) {
+        const autoIds = new Set<string>();
+        for (const t of hierRes.json?.value ?? []) {
+          const p = t._msdyn_parenttask_value;
+          if (p) autoIds.add(String(p).toLowerCase());
+        }
+        // Merge auto-detected with any explicitly provided ids.
+        const explicit = asArray<string>(input.summaryTaskIds ?? [], "summaryTaskIds");
+        for (const id of explicit) autoIds.add(id.toLowerCase());
+        effectiveSummaryIds = [...autoIds];
+      }
+      // If the hierarchy fetch fails, fall back to whatever the caller provided.
+    }
+
     // Defense in depth + summary-task protection (same checks as the raw tool).
-    validateUpdateEntities(entities, input.summaryTaskIds);
+    validateUpdateEntities(entities, effectiveSummaryIds);
 
     const response = await dvReq({
       url: BASE + "/msdyn_PssUpdateV2",
