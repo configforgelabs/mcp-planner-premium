@@ -60,6 +60,10 @@ export interface BuiltBatch {
   refToId: Record<string, string>;
   /** GUIDs of tasks flagged milestone (NOT set here - for a follow-up update). */
   milestoneTaskIds: string[];
+  /** GUIDs of dependency entities created (msdyn_projecttaskdependencyid).
+   * PSS requires these to be deleted BEFORE their referenced tasks — include
+   * them in delete_tasks_batch records when cleaning up. */
+  dependencyIds: string[];
 }
 
 /**
@@ -156,6 +160,7 @@ export function buildTaskEntities(
   const taskEntities: any[] = [];
   const depEntities: any[] = [];
   const milestoneTaskIds: string[] = [];
+  const dependencyIds: string[] = [];
 
   for (const t of ordered) {
     const id = refToId[t.ref];
@@ -197,9 +202,11 @@ export function buildTaskEntities(
       // schema name, not the lowercase logical name. msdyn_project@odata.bind causes
       // "undeclared property 'msdyn_project' which only has property annotations"
       // because the schema nav-property is msdyn_Project (capital P).
+      const depId = randomUUID();
+      dependencyIds.push(depId);
       const depEnt: Record<string, unknown> = {
         "@odata.type": "Microsoft.Dynamics.CRM.msdyn_projecttaskdependency",
-        msdyn_projecttaskdependencyid: randomUUID(),
+        msdyn_projecttaskdependencyid: depId,
         "msdyn_Project@odata.bind": "/msdyn_projects(" + projectId + ")",
         "msdyn_PredecessorTask@odata.bind": "/msdyn_projecttasks(" + predId + ")",
         "msdyn_SuccessorTask@odata.bind": "/msdyn_projecttasks(" + id + ")",
@@ -227,6 +234,7 @@ export function buildTaskEntities(
     entities: [...taskEntities, ...depEntities],
     refToId,
     milestoneTaskIds,
+    dependencyIds,
   };
 }
 
@@ -384,11 +392,16 @@ export const addTasksSimple: ToolDef = {
       queued: built.entities.length,
       taskRefs: built.refToId,
       milestoneTaskIds: built.milestoneTaskIds,
+      dependencyIds: built.dependencyIds,
       response: response.json || {},
       note:
         built.milestoneTaskIds.length > 0
           ? "Queued. Milestones cannot be set via the API (PSS rejects msdyn_ismilestone on create and update) - the milestoneTaskIds list the tasks the user must flag as milestones manually in the Planner UI. New tasks are appended at the end. NOT saved until 'Apply Changes to Plan'."
           : "Queued. New tasks are appended at the end (reorder in the Planner UI if needed). NOT saved until 'Apply Changes to Plan'.",
+      deleteNote:
+        built.dependencyIds.length > 0
+          ? "When cleaning up, include dependencyIds in delete_tasks_batch 'records' (entityLogicalName: msdyn_projecttaskdependency) BEFORE the task IDs — PSS rejects task deletion if dependency entities still reference them."
+          : undefined,
     };
   },
 };

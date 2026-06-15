@@ -294,8 +294,14 @@ Call: `add_tasks` with this exact payload (6-level parent chain + 1 sibling + 1 
 **Pass criteria:**
 - `ok` is `true`
 - `taskRefs` is an object with 7 keys (`L1`, `L2`, `L3`, `L4`, `L5`, `L6`, `SIB`), each a GUID string
+- `dependencyIds` is an array (should contain 1 GUID for the SIB→L2 FS dependency entity)
 
-Save `taskRefs.L6` as `LEAF_TASK_ID`. Save all 7 IDs as `CREATED_TASK_IDS`.
+Save `taskRefs.L6` as `LEAF_TASK_ID`. Save all 7 IDs as `CREATED_TASK_IDS`. Save `dependencyIds` as `CREATED_DEP_IDS`.
+
+> `dependencyIds` contains the `msdyn_projecttaskdependencyid` GUIDs for any dependency entities
+> created alongside the tasks. PSS requires these to be deleted **before** the task entities that
+> reference them — omitting them from the cleanup causes `E_INVALIDENTITYUID` on the first task
+> that has a dependency (SIB, at index 1 in the leaves-first batch).
 
 ### Step 2.5 — apply_changes
 
@@ -409,9 +415,16 @@ Call: `delete_tasks_batch` with:
   "operationSetId": "<OP_SET_CLEAN>",
   "projectId": "<NEW_PROJECT_ID>",
   "taskIds": <CREATED_TASK_IDS>,
+  "records": [
+    { "entityLogicalName": "msdyn_projecttaskdependency", "recordId": "<CREATED_DEP_IDS[0]>" }
+  ],
   "confirmed": true
 }
 ```
+
+> If `CREATED_DEP_IDS` is empty (no dependencies were created), omit the `records` field.
+> The dependency record must be in `records` because `taskIds` only expands to task entities.
+> The ordering is: dependency records are sent first (before the auto-sorted task deletes).
 
 Call: `apply_changes` with `{ "operationSetId": "<OP_SET_CLEAN>" }`
 

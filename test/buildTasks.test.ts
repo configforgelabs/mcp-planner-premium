@@ -133,6 +133,9 @@ describe("buildTaskEntities", () => {
     const deps = built.entities.filter((e) => e["@odata.type"] === TASK ? false : true);
     expect(deps).toHaveLength(1);
     const dep = built.entities.find((e) => e["@odata.type"] === DEP)!;
+    // dependencyIds must contain the dep's primary key so callers can delete it later.
+    expect(built.dependencyIds).toHaveLength(1);
+    expect(built.dependencyIds[0]).toBe(dep.msdyn_projecttaskdependencyid);;
     expect(dep.msdyn_projecttaskdependencylinktype).toBe(192350001); // SS
     expect(dep.msdyn_linklagduration).toBe(120);
     // PSS requires the project bind on the dependency entity. On
