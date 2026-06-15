@@ -15,8 +15,8 @@ describe("list_dependencies graceful degrade", () => {
   beforeEach(() => {
     process.env.DATAVERSE_ORG_URL = ORG;
     process.env.LOG_LEVEL = "silent";
-    // Avoid env leakage from other test files (e.g. AUTH_MODE=validate).
     process.env.AUTH_MODE = "insecure-passthrough";
+    process.env.DATAVERSE_LINK_TYPE_STYLE = "global";
     delete process.env.TENANT_ID;
     resetEnvCache();
   });

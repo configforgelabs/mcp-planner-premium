@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { getApiBase } from "../config.js";
+import { getApiBase, getEnv } from "../config.js";
 import {
   dvReq,
   dvHeaders,
@@ -15,16 +15,22 @@ import type { ToolDef } from "./types.js";
 const GUID_RE = /^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
 const isGuid = (s: string): boolean => GUID_RE.test(s);
 
-// FS/SS/FF/SF -> option-set values sent to PSS on create.
-// Uses the standard 192350000-range. EU/CRM4 tenants expose a 0-3 small-integer
-// range in metadata (describe_option_set), but whether PSS on those tenants also
-// requires 0-3 (vs. accepting 192350000) is unconfirmed. Do not change these
-// values until confirmed against a live EU tenant dependency creation.
-const LINK_TYPE_VALUES: Record<string, number> = {
+// FS/SS/FF/SF -> option-set integers sent to PSS. Two value ranges exist;
+// the correct one is selected at runtime from DATAVERSE_LINK_TYPE_STYLE.
+export const LINK_TYPE_VALUES_GLOBAL: Record<string, number> = {
   FS: 192350000,
   SS: 192350001,
   FF: 192350002,
   SF: 192350003,
+};
+
+// EU/CRM4 tenants (confirmed via describe_option_set + live ScheduleAPI-AV-0043
+// rejection of 192350000): FinishToStart=1, StartToStart=3, FinishToFinish=0, StartToFinish=2.
+export const LINK_TYPE_VALUES_EU: Record<string, number> = {
+  FS: 1,
+  SS: 3,
+  FF: 0,
+  SF: 2,
 };
 
 export interface SimpleDependency {
@@ -106,6 +112,7 @@ export function buildTaskEntities(
   projectId: string,
   tasks: SimpleTask[],
   resolveBucketId: (bucket: string) => string,
+  linkTypeValues: Record<string, number> = LINK_TYPE_VALUES_GLOBAL,
 ): BuiltBatch {
   if (!Array.isArray(tasks) || tasks.length === 0)
     throw new Error("tasks must be a non-empty array.");
@@ -194,7 +201,7 @@ export function buildTaskEntities(
         "msdyn_SuccessorTask@odata.bind": "/msdyn_projecttasks(" + id + ")",
       };
       if (dep.type) {
-        const v = LINK_TYPE_VALUES[dep.type];
+        const v = linkTypeValues[dep.type];
         if (v === undefined)
           throw new Error(
             "Task '" + t.ref + "': dependency type must be FS, SS, FF or SF.",
@@ -339,7 +346,11 @@ export const addTasksSimple: ToolDef = {
       return isGuid(b) ? b : nameToId[b.toLowerCase()];
     };
 
-    const built = buildTaskEntities(projectId, tasks, resolveBucketId);
+    const linkTypeValues =
+      getEnv().DATAVERSE_LINK_TYPE_STYLE === "eu"
+        ? LINK_TYPE_VALUES_EU
+        : LINK_TYPE_VALUES_GLOBAL;
+    const built = buildTaskEntities(projectId, tasks, resolveBucketId, linkTypeValues);
 
     // Defense in depth: the built collection must still pass the raw guardrails.
     validateAddEntities(built.entities);

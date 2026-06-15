@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { buildTaskEntities, type SimpleTask } from "../src/tools/addTasksSimple.js";
+import {
+  buildTaskEntities,
+  LINK_TYPE_VALUES_GLOBAL,
+  LINK_TYPE_VALUES_EU,
+  type SimpleTask,
+} from "../src/tools/addTasksSimple.js";
 import { validateAddEntities } from "../src/tools/addTasks.js";
 
 const PROJECT = "11111111-2222-3333-4444-555555555555";
@@ -165,6 +170,19 @@ describe("buildTaskEntities", () => {
     expect(built.entities[0].msdyn_ismilestone).toBeUndefined();
     expect(built.milestoneTaskIds).toEqual([built.refToId.m]);
     expect(() => validateAddEntities(built.entities)).not.toThrow();
+  });
+
+  it("uses EU link type values (0-3) when the EU map is passed", () => {
+    const tasks: SimpleTask[] = [
+      { ref: "a", subject: "A", bucket: BUCKET },
+      { ref: "b", subject: "B", bucket: BUCKET, dependsOn: [{ on: "a", type: "FS" }] },
+    ];
+    const builtGlobal = buildTaskEntities(PROJECT, tasks, resolve, LINK_TYPE_VALUES_GLOBAL);
+    const builtEu = buildTaskEntities(PROJECT, tasks, resolve, LINK_TYPE_VALUES_EU);
+    const depGlobal = builtGlobal.entities.find((e) => e["@odata.type"] === DEP)!;
+    const depEu = builtEu.entities.find((e) => e["@odata.type"] === DEP)!;
+    expect(depGlobal.msdyn_projecttaskdependencylinktype).toBe(192350000); // FS global
+    expect(depEu.msdyn_projecttaskdependencylinktype).toBe(1);             // FS eu
   });
 
   it("rejects duplicate refs and missing required fields", () => {
