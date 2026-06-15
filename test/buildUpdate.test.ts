@@ -52,6 +52,25 @@ describe("buildUpdateEntities", () => {
     );
   });
 
+  it("emits msdyn_projectbucket@odata.bind when a resolved bucketId is supplied", () => {
+    const BUCKET = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+    const resolved = new Map([[0, BUCKET]]);
+    const { entities, warnings } = buildUpdateEntities(
+      [{ taskId: ID, subject: "Move me", bucket: "Sprint 2" }],
+      resolved,
+    );
+    expect(entities[0]["msdyn_projectbucket@odata.bind"]).toBe(
+      "/msdyn_projectbuckets(" + BUCKET + ")",
+    );
+    expect(warnings).toHaveLength(0);
+  });
+
+  it("throws when bucket is provided but no resolved id is in the map", () => {
+    expect(() =>
+      buildUpdateEntities([{ taskId: ID, bucket: "Missing Bucket" }], new Map()),
+    ).toThrow(/could not be resolved/);
+  });
+
   it("requires a GUID taskId and at least one change", () => {
     expect(() => buildUpdateEntities([{ taskId: "nope", subject: "x" }])).toThrow(
       /taskId must be a GUID/,
