@@ -1,0 +1,163 @@
+import { getBearer } from "./context.js";
+import { getEnv } from "./config.js";
+
+/**
+ * Normalised Dataverse response: `{ status, json }`. A missing/HTTP-error body
+ * still yields a parsed object when possible, so the ported guardrail checks
+ * (`status >= 400`, `body.error.message`) stay faithful.
+ */
+export interface DvResponse {
+  status: number;
+  json: any;
+}
+
+export interface DvRequest {
+  url: string;
+  method: string;
+  headers?: Record<string, string>;
+  body?: unknown;
+}
+
+export interface DvRequestOptions {
+  /** Retry transient 429/5xx (only safe for idempotent reads). Default false. */
+  retry?: boolean;
+}
+
+/** Extracts a human message from an unknown thrown value. */
+export function errMessage(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (e && typeof e === "object" && "message" in e)
+    return String((e as { message: unknown }).message);
+  return String(e);
+}
+
+const GUID_RE = /^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
+
+export const isGuid = (s: string): boolean => GUID_RE.test(s);
+
+/** Throws a clean validation error if `value` is not a canonical GUID. */
+export function assertGuid(value: string | undefined, label: string): string {
+  const v = (value || "").trim();
+  if (!v) throw new Error(`${label} is required.`);
+  if (!GUID_RE.test(v)) throw new Error(`${label} must be a GUID.`);
+  return v;
+}
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((r) => setTimeout(r, ms));
+
+async function readBody(res: Response): Promise<any> {
+  const text = await res.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { raw: text };
+  }
+}
+
+/**
+ * Replacement for Langdock's `ld.request`. Adds an outbound timeout and (for
+ * reads) bounded, Retry-After-aware retry on 429/5xx. Never throws on an HTTP
+ * error STATUS - it returns `{ status, json }`. Transport failures and timeouts
+ * DO throw, with a clear message.
+ */
+export async function dvReq(
+  req: DvRequest,
+  opts: DvRequestOptions = {},
+): Promise<DvResponse> {
+  const timeoutMs = getEnv().REQUEST_TIMEOUT_MS;
+  const maxAttempts = opts.retry ? 4 : 1;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(req.url, {
+        method: req.method,
+        headers: req.headers,
+        body: req.body === undefined ? undefined : JSON.stringify(req.body),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (e: unknown) {
+      if (e instanceof Error && e.name === "TimeoutError")
+        throw new Error(`Dataverse did not respond within ${timeoutMs}ms.`);
+      throw new Error("HTTP call failed: " + errMessage(e));
+    }
+
+    const json = await readBody(res);
+    const retryable = res.status === 429 || res.status >= 500;
+    if (opts.retry && retryable && attempt < maxAttempts) {
+      const retryAfter = Number(res.headers.get("retry-after"));
+      const delaySec =
+        Number.isFinite(retryAfter) && retryAfter > 0
+          ? retryAfter
+          : Math.pow(2, attempt);
+      await sleep(delaySec * 1000);
+      continue;
+    }
+    return { status: res.status, json };
+  }
+  // Unreachable: the loop always returns on the final attempt.
+  throw new Error("dvReq: exhausted retries unexpectedly.");
+}
+
+/**
+ * Standard Dataverse headers. The delegated bearer is pulled from the current
+ * request context. `json: true` adds Content-Type for write bodies; `extra` for
+ * one-offs like `Prefer`.
+ */
+export function dvHeaders(opts?: {
+  json?: boolean;
+  extra?: Record<string, string>;
+}): Record<string, string> {
+  const headers: Record<string, string> = {
+    Authorization: "Bearer " + getBearer(),
+    "OData-MaxVersion": "4.0",
+    "OData-Version": "4.0",
+    Accept: "application/json",
+  };
+  if (opts?.json) headers["Content-Type"] = "application/json";
+  if (opts?.extra) Object.assign(headers, opts.extra);
+  return headers;
+}
+
+/** Extracts `body.error.message` with the same fallback the actions used. */
+export function dvErrorMessage(response: DvResponse): string {
+  const body = response.json || {};
+  return (body.error && body.error.message) || "HTTP " + response.status;
+}
+
+/**
+ * Shared error handling for the PSS batch-create calls (msdyn_PssCreateV2),
+ * used by both the raw and ergonomic add-task tools. Throws on HTTP error.
+ */
+export function throwIfPssCreateError(response: DvResponse): void {
+  if (response.status < 400) return;
+  const msg = dvErrorMessage(response);
+  if (response.status === 403)
+    throw new Error("403 - missing license or privileges: " + msg);
+  if (/duplicate entities/i.test(msg))
+    throw new Error(
+      "pss_create_batch failed: duplicate entities in this change session - the same batch was likely submitted twice. Cancel this change session, start a fresh one, and submit the batch EXACTLY ONCE (never call both in the same parallel block). Detail: " +
+        msg,
+    );
+  throw new Error("pss_create_batch failed (" + response.status + "): " + msg);
+}
+
+/** Parses an input that may arrive as a JSON string or as a real array. */
+export function asArray<T = any>(input: unknown, label: string): T[] {
+  let value: unknown = input;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    try {
+      value = JSON.parse(trimmed);
+    } catch (e: unknown) {
+      throw new Error(`${label} must be a JSON array: ${errMessage(e)}`);
+    }
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be a JSON array.`);
+  }
+  return value as T[];
+}

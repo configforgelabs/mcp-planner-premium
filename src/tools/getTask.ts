@@ -1,0 +1,130 @@
+import { z } from "zod";
+import { getApiBase } from "../config.js";
+import { dvReq, dvHeaders, dvErrorMessage, assertGuid } from "../dataverse.js";
+import { linkTypeLabel } from "./readHelpers.js";
+import type { ToolDef } from "./types.js";
+
+// One task in full, including its dependency links and resource assignments.
+// The dependency/assignment read-column names are DERIVED from the verified
+// write binds (no public entity-reference page exists), so those sub-reads
+// degrade to a warning on 400 rather than failing the whole tool.
+export const getTask: ToolDef = {
+  name: "get_task",
+  title: "Get Task",
+  description:
+    "Returns full detail for one task by GUID: dates, effort, % complete, milestone flag, outline level, bucket and parent, plus its predecessor/successor dependency links and resource assignments. Dependency and assignment data may be omitted (with a warning) on environments where those columns differ - the core task fields always return.",
+  inputSchema: {
+    taskId: z.string().describe("GUID of the task (msdyn_projecttaskid)."),
+  },
+  handler: async (input: { taskId: string }) => {
+    const BASE = getApiBase();
+    const taskId = assertGuid(input.taskId, "taskId");
+    const warnings: string[] = [];
+
+    const taskRes = await dvReq(
+      {
+        url:
+          BASE +
+          "/msdyn_projecttasks(" +
+          taskId +
+          ")?$select=msdyn_projecttaskid,msdyn_subject,msdyn_start,msdyn_finish,msdyn_progress," +
+          "msdyn_effort,msdyn_outlinelevel,msdyn_displaysequence,msdyn_ismilestone,msdyn_priority," +
+          "_msdyn_projectbucket_value,_msdyn_parenttask_value",
+        method: "GET",
+        headers: dvHeaders(),
+      },
+      { retry: true },
+    );
+    if (taskRes.status >= 400)
+      throw new Error("get_task failed (" + taskRes.status + "): " + dvErrorMessage(taskRes));
+    const t = taskRes.json || {};
+
+    // Dependencies in both directions (derived read-column names; degrade on 400).
+    const predecessors: any[] = [];
+    const successors: any[] = [];
+    try {
+      const depRes = await dvReq(
+        {
+          url:
+            BASE +
+            "/msdyn_projecttaskdependency?$select=_msdyn_predecessortask_value," +
+            "_msdyn_successortask_value,msdyn_projecttaskdependencylinktype,msdyn_linklagduration" +
+            "&$filter=_msdyn_predecessortask_value eq " +
+            taskId +
+            " or _msdyn_successortask_value eq " +
+            taskId,
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      if (depRes.status >= 400) {
+        warnings.push("Dependency links unavailable on this environment.");
+      } else {
+        for (const d of depRes.json?.value || []) {
+          const link = {
+            predecessorTaskId: d._msdyn_predecessortask_value,
+            successorTaskId: d._msdyn_successortask_value,
+            type: linkTypeLabel(d.msdyn_projecttaskdependencylinktype),
+            lagMinutes: d.msdyn_linklagduration ?? null,
+          };
+          if (String(d._msdyn_successortask_value).toLowerCase() === taskId.toLowerCase())
+            predecessors.push(link);
+          else successors.push(link);
+        }
+      }
+    } catch (e) {
+      warnings.push("Dependency read failed: " + (e instanceof Error ? e.message : String(e)));
+    }
+
+    // Resource assignments (derived names; degrade on 400).
+    let assignments: any[] = [];
+    try {
+      const asgRes = await dvReq(
+        {
+          url:
+            BASE +
+            "/msdyn_resourceassignments?$select=msdyn_resourceassignmentid," +
+            "_msdyn_taskid_value,_msdyn_projectteamid_value,_msdyn_projectid_value" +
+            "&$filter=_msdyn_taskid_value eq " +
+            taskId,
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      if (asgRes.status >= 400) {
+        warnings.push("Resource assignments unavailable on this environment.");
+      } else {
+        assignments = (asgRes.json?.value || []).map((a: any) => ({
+          assignmentId: a.msdyn_resourceassignmentid,
+          teamMemberId: a._msdyn_projectteamid_value,
+        }));
+      }
+    } catch (e) {
+      warnings.push("Assignment read failed: " + (e instanceof Error ? e.message : String(e)));
+    }
+
+    return {
+      ok: true,
+      task: {
+        taskId: t.msdyn_projecttaskid,
+        subject: t.msdyn_subject,
+        start: t.msdyn_start ?? null,
+        finish: t.msdyn_finish ?? null,
+        progressPercent:
+          typeof t.msdyn_progress === "number" ? Math.round(t.msdyn_progress * 100) : null,
+        effortHours: t.msdyn_effort ?? null,
+        outlineLevel: t.msdyn_outlinelevel ?? null,
+        isMilestone: t.msdyn_ismilestone === true,
+        priority: t.msdyn_priority ?? null,
+        bucketId: t._msdyn_projectbucket_value ?? null,
+        parentTaskId: t._msdyn_parenttask_value ?? null,
+      },
+      predecessors,
+      successors,
+      assignments,
+      warnings,
+    };
+  },
+};
