@@ -303,6 +303,34 @@ The harness:
 
 > **Residue:** whole-plan deletion is blocked by the PSS API. Each write run leaves one clearly-named test plan (`ZZ-MCP-E2E-<UTC>`) — the report lists it and you remove it in the Planner UI.
 
+## Open TODOs
+
+Known gaps and planned improvements. Contributions welcome.
+
+### Read tools
+
+- **`list_plan_tasks` — extended optional fields.** `remainingEffortHours`, `durationHours`, `actualStart`, `actualFinish` are absent from the list response. They exist only on Project Operations tenants (not basic Planner Premium) and require a try-with-fallback pattern on a paged collection query (the single-entity `get_task` already does this). Implement the same graceful degrade for `list_plan_tasks`.
+
+- **`list_dependencies` — environment availability.** On some tenants `msdyn_projecttaskdependency` is not exposed (returns 404, degraded to empty list + warning). No known workaround; investigate whether a different query path surfaces the data.
+
+- **`describe_option_set` — link-type value range varies by tenant.** The server's hard-coded `LINK_TYPE_VALUES` uses the 192350000-range (standard tenants) or 0-3 (EU/CRM4, controlled by `DATAVERSE_LINK_TYPE_STYLE`). Consider resolving the correct values at runtime via `describe_option_set` at boot rather than requiring an env var.
+
+### Write tools
+
+- **Task reparenting.** `update_tasks` does not support changing a task's parent (`msdyn_parenttask@odata.bind`). Whether PSS honours a parent change on update is unconfirmed live — needs an e2e test. If supported, add a `parent` field (ref or GUID) to `update_tasks`.
+
+- **Sprint assignment.** Neither `add_tasks` nor `update_tasks` supports assigning a task to a sprint (`msdyn_projectsprint@odata.bind`). Accessible via the raw `add_tasks_batch` / `update_tasks_batch` escape hatches.
+
+- **Resource assignments.** Creating or removing resource assignments (`msdyn_resourceassignment`) is not supported. These are separate entities that go through PSS create/delete; they could be added as a new tool or as an extension to `add_tasks`.
+
+- **Milestone flag.** `msdyn_ismilestone` is engine-managed and rejected by PSS on both create and update (`ScheduleAPI-AV-0002`). No API path is currently known. Investigate whether a different Dataverse action exposes it; otherwise this remains UI-only.
+
+### Infrastructure
+
+- **`DATAVERSE_LINK_TYPE_STYLE` auto-detection.** Currently a required env var. A better UX would be to probe `describe_option_set` at startup, detect which range the tenant uses, and set the style automatically — removing the manual configuration step.
+
+- **Schema capability cache.** `get_task` probes for extended fields (`msdyn_remainingeffort`, `msdyn_duration`, `msdyn_actualstart`, `msdyn_actualfinish`) on every call, wasting a round-trip on the retry when the tenant lacks them. Cache the result at server startup so subsequent calls skip the extended `$select` immediately on tenants that don't support it.
+
 ## Security
 
 This server holds **no long-lived secret of its own**; it only relays the
