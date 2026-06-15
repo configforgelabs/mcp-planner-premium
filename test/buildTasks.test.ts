@@ -118,12 +118,26 @@ describe("buildTaskEntities", () => {
     const dep = built.entities.find((e) => e["@odata.type"] === DEP)!;
     expect(dep.msdyn_projecttaskdependencylinktype).toBe(192350001); // SS
     expect(dep.msdyn_linklagduration).toBe(120);
-    expect(dep["msdyn_predecessortask@odata.bind"]).toBe(
+    // Lookup binds use the PascalCase schema nav-property names. The lowercase
+    // logical names make Dataverse reject the payload as annotation-only.
+    expect(dep["msdyn_PredecessorTask@odata.bind"]).toBe(
       "/msdyn_projecttasks(" + built.refToId.a + ")",
     );
-    expect(dep["msdyn_successortask@odata.bind"]).toBe(
+    expect(dep["msdyn_SuccessorTask@odata.bind"]).toBe(
       "/msdyn_projecttasks(" + built.refToId.b + ")",
     );
+    // Regression guard for the annotation-only-property bug: the lowercase
+    // logical-name keys must NOT be present.
+    expect("msdyn_predecessortask@odata.bind" in dep).toBe(false);
+    expect("msdyn_successortask@odata.bind" in dep).toBe(false);
+    // Every `<x>@odata.bind` annotation on the dependency must carry a value
+    // (an annotation with no property value is exactly what Dataverse rejects).
+    for (const k of Object.keys(dep)) {
+      if (k.endsWith("@odata.bind")) {
+        expect(typeof dep[k]).toBe("string");
+        expect((dep[k] as string).length).toBeGreaterThan(0);
+      }
+    }
     // All task entities precede all dependency entities.
     const lastTask = Math.max(
       ...built.entities

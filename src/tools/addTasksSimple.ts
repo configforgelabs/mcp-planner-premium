@@ -169,11 +169,17 @@ export function buildTaskEntities(
 
     for (const dep of t.dependsOn || []) {
       const predId = resolvePredecessorId(dep.on, t.ref);
+      // The lookup navigation properties are the PascalCase schema names
+      // (msdyn_PredecessorTask / msdyn_SuccessorTask), NOT the lowercase logical
+      // names. Lowercase keys make Dataverse OData reject the payload with
+      // "undeclared property ... which only has property annotations ... but no
+      // property value was found". The read side still uses the lowercase
+      // _value alias (that is a different, value-side name).
       const depEnt: Record<string, unknown> = {
         "@odata.type": "Microsoft.Dynamics.CRM.msdyn_projecttaskdependency",
         msdyn_projecttaskdependencyid: randomUUID(),
-        "msdyn_predecessortask@odata.bind": "/msdyn_projecttasks(" + predId + ")",
-        "msdyn_successortask@odata.bind": "/msdyn_projecttasks(" + id + ")",
+        "msdyn_PredecessorTask@odata.bind": "/msdyn_projecttasks(" + predId + ")",
+        "msdyn_SuccessorTask@odata.bind": "/msdyn_projecttasks(" + id + ")",
       };
       if (dep.type) {
         const v = LINK_TYPE_VALUES[dep.type];
@@ -234,7 +240,7 @@ const taskSchema = z.object({
   milestone: z
     .boolean()
     .optional()
-    .describe("Mark as milestone. Cannot be set on create - returned in milestoneTaskIds to set via a follow-up update_tasks_batch."),
+    .describe("Request a milestone. Cannot be set via the API (PSS rejects msdyn_ismilestone on create and update). The taskId is returned in milestoneTaskIds so you can tell the user which tasks to flag manually in the Planner UI."),
   dependsOn: z
     .array(dependencySchema)
     .optional()
@@ -343,7 +349,7 @@ export const addTasksSimple: ToolDef = {
       response: response.json || {},
       note:
         built.milestoneTaskIds.length > 0
-          ? "Queued. After 'Apply Changes to Plan' completes, set milestones via update_tasks_batch (msdyn_ismilestone=true) on milestoneTaskIds. New tasks are appended at the end. NOT saved until 'Apply Changes to Plan'."
+          ? "Queued. Milestones cannot be set via the API (PSS rejects msdyn_ismilestone on create and update) - the milestoneTaskIds list the tasks the user must flag as milestones manually in the Planner UI. New tasks are appended at the end. NOT saved until 'Apply Changes to Plan'."
           : "Queued. New tasks are appended at the end (reorder in the Planner UI if needed). NOT saved until 'Apply Changes to Plan'.",
     };
   },

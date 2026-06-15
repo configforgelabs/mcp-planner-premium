@@ -101,8 +101,20 @@ describe("validateAddEntities", () => {
 
   it("rejects a dependency missing predecessor/successor", () => {
     expect(() => validateAddEntities([{ "@odata.type": DEP }])).toThrow(
-      /predecessortask@odata.bind and msdyn_successortask@odata.bind are required/,
+      /PredecessorTask@odata.bind and msdyn_SuccessorTask@odata.bind are required/,
     );
+  });
+
+  it("teaches the PascalCase nav-property for lowercase dependency binds", () => {
+    expect(() =>
+      validateAddEntities([
+        {
+          "@odata.type": DEP,
+          "msdyn_predecessortask@odata.bind": "/msdyn_projecttasks(" + guid(1) + ")",
+          "msdyn_successortask@odata.bind": "/msdyn_projecttasks(" + guid(2) + ")",
+        },
+      ]),
+    ).toThrow(/is not a valid navigation property. Use 'msdyn_PredecessorTask@odata.bind'/);
   });
 
   it("rejects an invalid dependency link type", () => {
@@ -110,8 +122,8 @@ describe("validateAddEntities", () => {
       validateAddEntities([
         {
           "@odata.type": DEP,
-          "msdyn_predecessortask@odata.bind": "/msdyn_projecttasks(" + guid(1) + ")",
-          "msdyn_successortask@odata.bind": "/msdyn_projecttasks(" + guid(2) + ")",
+          "msdyn_PredecessorTask@odata.bind": "/msdyn_projecttasks(" + guid(1) + ")",
+          "msdyn_SuccessorTask@odata.bind": "/msdyn_projecttasks(" + guid(2) + ")",
           msdyn_projecttaskdependencylinktype: 999,
         },
       ]),

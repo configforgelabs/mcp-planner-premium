@@ -18,18 +18,31 @@ export interface SimpleTaskUpdate {
   priority?: number;
 }
 
+export interface BuiltUpdate {
+  entities: any[];
+  /** User-visible notes about fields that were dropped (e.g. milestone). */
+  warnings: string[];
+}
+
 /**
  * Translates the ergonomic update list into PSS update entities. Only the fields
  * the caller provides are emitted; `progressPercent` (0-100) is converted to
  * `msdyn_progress` (0-1). Pure and unit-testable. Summary-task rolled-up-field
  * protection is enforced separately by validateUpdateEntities (which the handler
  * runs on the result).
+ *
+ * `milestone` is intentionally NEVER emitted: PSS rejects msdyn_ismilestone on
+ * update (ScheduleAPI-AV-0002) just as it does on create - the scheduling engine
+ * manages that flag itself (it even auto-sets it on summary tasks). When a caller
+ * passes `milestone`, it is dropped and a warning is returned instead of failing
+ * the whole batch.
  */
-export function buildUpdateEntities(tasks: SimpleTaskUpdate[]): any[] {
+export function buildUpdateEntities(tasks: SimpleTaskUpdate[]): BuiltUpdate {
   if (!Array.isArray(tasks) || tasks.length === 0)
     throw new Error("tasks must be a non-empty array.");
 
-  return tasks.map((t, i) => {
+  const warnings: string[] = [];
+  const entities = tasks.map((t, i) => {
     const id = (t.taskId || "").trim();
     if (!id) throw new Error("tasks[" + i + "]: taskId is required.");
     if (!GUID_RE.test(id))
@@ -69,8 +82,17 @@ export function buildUpdateEntities(tasks: SimpleTaskUpdate[]): any[] {
       changed++;
     }
     if (t.milestone !== undefined) {
-      ent.msdyn_ismilestone = t.milestone;
-      changed++;
+      // Dropped on purpose - see the function doc. Never put msdyn_ismilestone
+      // in a PSS update payload.
+      warnings.push(
+        "tasks[" +
+          i +
+          "] (" +
+          id +
+          "): 'milestone' was ignored - Planner Premium's scheduling engine does " +
+          "not allow setting msdyn_ismilestone via the API (it manages the flag " +
+          "itself). Set the milestone manually in the Planner UI if you need it.",
+      );
     }
     if (t.priority !== undefined) {
       ent.msdyn_priority = t.priority;
@@ -78,10 +100,18 @@ export function buildUpdateEntities(tasks: SimpleTaskUpdate[]): any[] {
     }
     if (changed === 0)
       throw new Error(
-        "tasks[" + i + "]: nothing to change - provide at least one field besides taskId.",
+        "tasks[" +
+          i +
+          "]: nothing to change - provide at least one field besides taskId" +
+          (t.milestone !== undefined
+            ? " (milestone cannot be changed via the API - set it in the Planner UI)"
+            : "") +
+          ".",
       );
     return ent;
   });
+
+  return { entities, warnings };
 }
 
 const updateSchema = z.object({
@@ -95,7 +125,12 @@ const updateSchema = z.object({
     .number()
     .optional()
     .describe("Percent complete, 0-100 (server converts to the 0-1 the API expects)."),
-  milestone: z.boolean().optional().describe("Set/clear the milestone flag."),
+  milestone: z
+    .boolean()
+    .optional()
+    .describe(
+      "IGNORED - milestone cannot be set via the API (PSS rejects msdyn_ismilestone on update and the engine manages it). Passing it returns a warning; set milestones in the Planner UI.",
+    ),
   priority: z.number().optional().describe("Priority (integer option-set value)."),
 });
 
@@ -105,7 +140,7 @@ export const updateTasksSimple: ToolDef = {
   name: "update_tasks",
   title: "Update Tasks in Plan",
   description:
-    "Updates existing tasks from a SIMPLE list - you pass taskId plus only the fields to change (subject, description, start, finish, effortHours, progressPercent 0-100, milestone, priority); the server builds the Dataverse payload. Requires an open change session. NEVER change start/finish/effort/progress on summary (parent) tasks - fetch get_plan_tasks_and_buckets first and pass its summaryTaskIds so such writes are rejected (renames/descriptions on summary tasks are fine). Dependencies cannot be updated (delete and recreate). This IS where you set/clear the milestone flag (milestone is blocked on create but allowed on update - add_tasks returns milestoneTaskIds for exactly this follow-up). Get explicit user approval before queuing schedule changes. Saved only after 'Apply Changes to Plan'. For raw OData field control use the advanced update_tasks_batch.",
+    "Updates existing tasks from a SIMPLE list - you pass taskId plus only the fields to change (subject, description, start, finish, effortHours, progressPercent 0-100, priority); the server builds the Dataverse payload. Requires an open change session. NEVER change start/finish/effort/progress on summary (parent) tasks - fetch get_plan_tasks_and_buckets first and pass its summaryTaskIds so such writes are rejected (renames/descriptions on summary tasks are fine). Dependencies cannot be updated (delete and recreate). The milestone flag CANNOT be set via this API (the scheduling engine rejects msdyn_ismilestone on create and update and auto-manages it) - passing milestone returns a warning and is ignored; set milestones in the Planner UI. Get explicit user approval before queuing schedule changes. Saved only after 'Apply Changes to Plan'. For raw OData field control use the advanced update_tasks_batch.",
   inputSchema: {
     operationSetId: z
       .string()
@@ -131,7 +166,7 @@ export const updateTasksSimple: ToolDef = {
     if (!operationSetId) throw new Error("operationSetId is required.");
 
     const tasks = asArray<SimpleTaskUpdate>(input.tasks, "tasks");
-    const entities = buildUpdateEntities(tasks);
+    const { entities, warnings } = buildUpdateEntities(tasks);
 
     // Defense in depth + summary-task protection (same checks as the raw tool).
     validateUpdateEntities(entities, input.summaryTaskIds);
@@ -153,6 +188,7 @@ export const updateTasksSimple: ToolDef = {
     return {
       ok: true,
       queued: entities.length,
+      warnings,
       response: body,
       note: "Queued. Saved only after 'Apply Changes to Plan'.",
     };

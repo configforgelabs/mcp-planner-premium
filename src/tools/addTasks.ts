@@ -41,6 +41,11 @@ const BIND_ALIASES: Record<string, string> = {
   "msdyn_projectid@odata.bind": "msdyn_project@odata.bind",
   "msdyn_parent@odata.bind": "msdyn_parenttask@odata.bind",
   "msdyn_parenttaskid@odata.bind": "msdyn_parenttask@odata.bind",
+  // Dependency lookups bind on the PascalCase schema names. The lowercase
+  // logical names make Dataverse reject the payload as an annotation-only
+  // property with no value; teach the correct key instead.
+  "msdyn_predecessortask@odata.bind": "msdyn_PredecessorTask@odata.bind",
+  "msdyn_successortask@odata.bind": "msdyn_SuccessorTask@odata.bind",
 };
 
 // Dependency link types - option-set values of msdyn_projecttaskdependencylinktype.
@@ -195,13 +200,13 @@ export function validateAddEntities(entities: any[]): void {
     }
     if (t === "Microsoft.Dynamics.CRM.msdyn_projecttaskdependency") {
       if (
-        !ent["msdyn_predecessortask@odata.bind"] ||
-        !ent["msdyn_successortask@odata.bind"]
+        !ent["msdyn_PredecessorTask@odata.bind"] ||
+        !ent["msdyn_SuccessorTask@odata.bind"]
       ) {
         throw new Error(
           "entities[" +
             i +
-            "] (dependency): msdyn_predecessortask@odata.bind and msdyn_successortask@odata.bind are required.",
+            "] (dependency): msdyn_PredecessorTask@odata.bind and msdyn_SuccessorTask@odata.bind are required (PascalCase nav-property names).",
         );
       }
       // Optional link type: if present it must be one of the FS/SS/FF/SF option values.
