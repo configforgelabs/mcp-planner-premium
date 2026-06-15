@@ -174,7 +174,7 @@ container loudly instead of failing per-request).
 | `DATAVERSE_ORG_URL` | yes | — | `https://contoso.crm.dynamics.com` |
 | `TENANT_ID` | yes when `AUTH_MODE=validate` | — | Entra tenant GUID, e.g. `00000000-0000-0000-0000-000000000000` |
 | `AUTH_MODE` | no | `validate` | `validate` = verify inbound JWT; `insecure-passthrough` = skip (LOCAL DEV ONLY) |
-| `LANGDOCK_CLIENT_ID` | no (recommended) | — | App-registration client id; pins the token's `appid`/`azp` |
+| `LANGDOCK_CLIENT_ID` | no (recommended) | — | Client ID of the Entra app registration Langdock uses for OAuth (the same value you enter in Langdock's "Client ID" field). When set, the server rejects any token not issued to this app. |
 | `ALLOWED_HOSTS` | no | — | Extra Host(s) to allow (e.g. a custom domain). The Azure Container Apps FQDN is **auto-derived** at runtime, so you do not set it here. DNS-rebinding protection turns on automatically once a host is known. |
 | `ALLOWED_ORIGINS` | no | — | Comma list of allowed `Origin` headers (only checked when the client sends one) |
 | `PORT` | no | `443` | HTTPS port the ingress exposes. For local dev use a non-privileged port (`PORT=3000`). |
@@ -244,17 +244,36 @@ domain**, add it to `ALLOWED_HOSTS` (the auto-derived ACA host stays allowed too
 
 ## Wire up the MCP host (example: Langdock)
 
-Settings -> Integrations -> **Connect remote MCP** -> **Advanced OAuth (without DCR)**:
+### 1. Create a dedicated Entra app registration
+
+In the [Azure Portal](https://portal.azure.com) → **App registrations → New registration**:
+
+- **Name:** `Planner-Premium-MCP` (or similar)
+- **Supported account types:** Single tenant
+- **Redirect URI (Web):** Langdock's OAuth callback URL — Langdock shows this exact URL when you configure the connector (copy it from there)
+
+Then on the app:
+- **Certificates & secrets → New client secret** — copy the value immediately
+- **API permissions → Add a permission → APIs my organisation uses → `Dataverse`** → delegated `user_impersonation` → Grant admin consent
+
+The app's **Application (client) ID** is what goes into both Langdock and `LANGDOCK_CLIENT_ID` below.
+
+### 2. Add the connector in Langdock
+
+Settings → Integrations → **Connect remote MCP** → **Advanced OAuth (without DCR)**:
 
 - **Server URL**: `https://<container-app-fqdn>/mcp`
-- **Client ID / Secret**: your Entra app registration (e.g. `Planner-Premium-Writer`)
+- **Client ID**: the Application (client) ID from the app registration above
+- **Client Secret**: the secret you copied
 - **Authorization URL**: `https://login.microsoftonline.com/<tenantId>/oauth2/v2.0/authorize`
 - **Token URL**: `https://login.microsoftonline.com/<tenantId>/oauth2/v2.0/token`
 - **Scopes**: `https://contoso.crm.dynamics.com/user_impersonation offline_access openid profile`
 - **Custom header**: `Authorization` = `Bearer {{ access_token }}`
 
-Then in the Entra app registration, add the MCP host's OAuth callback URL as a
-**Web redirect URI**. Run **Test connection** - it should list the tools.
+Set `LANGDOCK_CLIENT_ID` on the container app to the same client ID so the server pins
+inbound tokens to this app and rejects anything else.
+
+Run **Test connection** — it should list the tools.
 Smoke-test with `whoami`, then the full happy path: `find_plan_by_name` /
 `create_plan` -> `add_bucket` -> `start_change_session` -> `add_tasks` ->
 `apply_changes` -> poll `check_change_session_status` until `192350003`
