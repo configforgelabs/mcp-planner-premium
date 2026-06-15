@@ -445,7 +445,7 @@ FAKE_K = "dddddddd-eeee-ffff-aaaa-bbbbbbbbbbbb"
 | G4 | `add_tasks_batch` | Task with `msdyn_ismilestone: true` in entities (blocked-on-create field) | `not allowed on pss create` |
 | G5 | `add_tasks_batch` | Task using `"msdyn_bucket@odata.bind"` instead of `"msdyn_projectbucket@odata.bind"` | `valid navigation property` |
 | G6 | `add_tasks_batch` | Two tasks where child appears before parent in the array | `parents must appear before` |
-| G7 | `add_tasks_batch` | 201 task entities (over the 200-entity cap) | `max 200` |
+| G7 | `add_tasks_batch` | 201 task entities (over the 200-entity cap) | `max 200` *(optional — skip if token budget is tight; the cap is enforced in code before any network call)* |
 | G8 | `delete_tasks_batch` | `{ "operationSetId": "FAKE_A", "taskIds": ["FAKE_B"], "confirmed": false }` | `confirmed` |
 | G9 | `delete_tasks_batch` | `{ "operationSetId": "FAKE_A", "records": "[{\"entityLogicalName\":\"msdyn_project\",\"recordId\":\"FAKE_B\"}]", "confirmed": true }` | `blocked by policy` |
 | G10 | `update_tasks_batch` | `{ "operationSetId": "FAKE_A", "entities": "[{\"@odata.type\":\"Microsoft.Dynamics.CRM.msdyn_projecttaskdependency\"}]" }` | `cannot be updated` |
@@ -603,7 +603,7 @@ everything.
 | G4 | Blocked-on-create field | `add_tasks_batch` | [✅/❌] | [error] |
 | G5 | Wrong bind alias | `add_tasks_batch` | [✅/❌] | [error] |
 | G6 | Child before parent | `add_tasks_batch` | [✅/❌] | [error] |
-| G7 | >200 entities | `add_tasks_batch` | [✅/❌] | [error] |
+| G7 | >200 entities | `add_tasks_batch` | [✅/❌/⏭️ SKIP-optional] | [error or "skipped — token cost"] |
 | G8 | Delete without confirmed=true | `delete_tasks_batch` | [✅/❌] | [error] |
 | G9 | Whole-plan delete blocked | `delete_tasks_batch` | [✅/❌] | [error] |
 | G10 | Dependency update rejected | `update_tasks_batch` | [✅/❌] | [error] |

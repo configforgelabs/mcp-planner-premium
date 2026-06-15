@@ -15,7 +15,11 @@ import type { ToolDef } from "./types.js";
 const GUID_RE = /^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
 const isGuid = (s: string): boolean => GUID_RE.test(s);
 
-// FS/SS/FF/SF -> option-set values of msdyn_projecttaskdependencylinktype.
+// FS/SS/FF/SF -> option-set values sent to PSS on create.
+// Uses the standard 192350000-range. EU/CRM4 tenants expose a 0-3 small-integer
+// range in metadata (describe_option_set), but whether PSS on those tenants also
+// requires 0-3 (vs. accepting 192350000) is unconfirmed. Do not change these
+// values until confirmed against a live EU tenant dependency creation.
 const LINK_TYPE_VALUES: Record<string, number> = {
   FS: 192350000,
   SS: 192350001,

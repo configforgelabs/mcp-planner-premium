@@ -50,11 +50,18 @@ const BIND_ALIASES: Record<string, string> = {
 
 // Dependency link types - option-set values of msdyn_projecttaskdependencylinktype.
 // FS is the default when the field is omitted.
+// Two value ranges exist: 192350000-style (global tenants) and 0-3 (EU/CRM4 tenants).
+// Both are accepted here so raw callers on either tenant can send valid payloads.
 const LINK_TYPES: Record<number, string> = {
   192350000: "FS", // Finish-to-Start (default)
   192350001: "SS", // Start-to-Start
   192350002: "FF", // Finish-to-Finish
   192350003: "SF", // Start-to-Finish
+  // EU/CRM4 small-integer range (confirmed via describe_option_set on CRM4 env)
+  0: "FF",
+  1: "FS",
+  2: "SF",
+  3: "SS",
 };
 
 /**

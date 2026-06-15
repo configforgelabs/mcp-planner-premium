@@ -129,6 +129,23 @@ describe("validateAddEntities", () => {
       ]),
     ).toThrow(/is invalid. Allowed option values/);
   });
+
+  it("accepts EU/CRM4 small-integer link type values (0-3)", () => {
+    // EU tenants expose link types as 0=FF, 1=FS, 2=SF, 3=SS in metadata.
+    // The guardrail must not reject them when a raw caller sends them.
+    for (const v of [0, 1, 2, 3]) {
+      expect(() =>
+        validateAddEntities([
+          {
+            "@odata.type": DEP,
+            "msdyn_PredecessorTask@odata.bind": "/msdyn_projecttasks(" + guid(1) + ")",
+            "msdyn_SuccessorTask@odata.bind": "/msdyn_projecttasks(" + guid(2) + ")",
+            msdyn_projecttaskdependencylinktype: v,
+          },
+        ]),
+      ).not.toThrow();
+    }
+  });
 });
 
 describe("validateUpdateEntities", () => {
