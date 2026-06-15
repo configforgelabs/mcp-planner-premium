@@ -14,6 +14,22 @@ const DELETABLE = [
 ];
 
 /**
+ * Converts the internal record list to the OData entity objects msdyn_PssDeleteV2
+ * expects in EntityCollection. The API uses the same OData entity format as
+ * msdyn_PssCreateV2 — NOT { EntityLogicalName, RecordId } descriptors (those
+ * cause "Invalid property 'EntityLogicalName' was found in entity crmbaseentity").
+ * Primary key field name follows the consistent Dataverse pattern: <logicalname>id.
+ */
+export function buildDeleteEntities(
+  records: { entityLogicalName: string; recordId: string }[],
+): any[] {
+  return records.map((r) => ({
+    "@odata.type": "Microsoft.Dynamics.CRM." + r.entityLogicalName,
+    [r.entityLogicalName + "id"]: r.recordId,
+  }));
+}
+
+/**
  * Validates the delete record list for msdyn_PssDeleteV2. Whole-plan deletes
  * are hard-blocked by policy. Pure (no network); unit-testable.
  */
@@ -111,10 +127,7 @@ export const deleteTasks: ToolDef = {
       method: "POST",
       headers: dvHeaders({ json: true }),
       body: {
-        EntityCollection: records.map((r) => ({
-          EntityLogicalName: r.entityLogicalName,
-          RecordId: r.recordId,
-        })),
+        EntityCollection: buildDeleteEntities(records),
         OperationSetId: operationSetId,
       },
     });
