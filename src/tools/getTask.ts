@@ -27,7 +27,7 @@ export const getTask: ToolDef = {
           BASE +
           "/msdyn_projecttasks(" +
           taskId +
-          ")?$select=msdyn_projecttaskid,msdyn_subject,msdyn_start,msdyn_finish,msdyn_progress," +
+          ")?$select=msdyn_projecttaskid,msdyn_subject,msdyn_description,msdyn_start,msdyn_finish,msdyn_progress," +
           "msdyn_effort,msdyn_outlinelevel,msdyn_displaysequence,msdyn_ismilestone,msdyn_priority," +
           "_msdyn_projectbucket_value,_msdyn_parenttask_value",
         method: "GET",
@@ -110,6 +110,7 @@ export const getTask: ToolDef = {
       task: {
         taskId: t.msdyn_projecttaskid,
         subject: t.msdyn_subject,
+        description: t.msdyn_description ?? null,
         start: t.msdyn_start ?? null,
         finish: t.msdyn_finish ?? null,
         progressPercent:
