@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { validateAddEntities } from "../src/tools/addTasks.js";
 import { validateUpdateEntities } from "../src/tools/updateTasks.js";
 import { validateDeleteRecords } from "../src/tools/deleteTasks.js";
+import { parsePssError, dvPssErrorMessage } from "../src/dataverse.js";
 
 const TASK = "Microsoft.Dynamics.CRM.msdyn_projecttask";
 const DEP = "Microsoft.Dynamics.CRM.msdyn_projecttaskdependency";
@@ -218,6 +219,97 @@ describe("validateUpdateEntities", () => {
         JSON.stringify([id]),
       ),
     ).toThrow(/roll up from its children/);
+  });
+});
+
+describe("parsePssError / dvPssErrorMessage", () => {
+  it("returns undefined for a plain OData error without PSS structure", () => {
+    expect(parsePssError({ error: { message: "Something went wrong" } })).toBeUndefined();
+  });
+
+  it("parses a raw top-level PSS error body (shape b)", () => {
+    const body = {
+      errorId: -1945829329,
+      errorKey: "E_BATCHFAILED",
+      ErrorMessage: "One of the batch requests failed",
+      failedBatchRequestIndex: 3,
+      failedBatchRequestError: {
+        errorId: -1945829343,
+        errorKey: "E_LIMITEXCEEDED_TASKLEVEL",
+        ErrorMessage: "Limit on level of task exceeded",
+      },
+    };
+    const result = parsePssError(body);
+    expect(result).toBeDefined();
+    expect(result!.outerKey).toBe("E_BATCHFAILED");
+    expect(result!.innerKey).toBe("E_LIMITEXCEEDED_TASKLEVEL");
+    expect(result!.failedBatchRequestIndex).toBe(3);
+    expect(result!.message).toContain("E_LIMITEXCEEDED_TASKLEVEL");
+  });
+
+  it("parses a PSS error embedded as JSON inside an OData error message (shape a)", () => {
+    const pssPayload = {
+      errorKey: "E_BATCHFAILED",
+      ErrorMessage: "One of the batch requests failed",
+      failedBatchRequestIndex: 2,
+      failedBatchRequestError: {
+        errorKey: "E_LIMITEXCEEDED_TASKLEVEL",
+        ErrorMessage: "Limit on level of task exceeded",
+      },
+    };
+    const body = { error: { message: JSON.stringify(pssPayload) } };
+    const result = parsePssError(body);
+    expect(result).toBeDefined();
+    expect(result!.innerKey).toBe("E_LIMITEXCEEDED_TASKLEVEL");
+    expect(result!.failedBatchRequestIndex).toBe(2);
+  });
+
+  it("dvPssErrorMessage falls back to dvErrorMessage for plain OData errors", () => {
+    const response = { status: 400, json: { error: { message: "Bad field" } } };
+    expect(dvPssErrorMessage(response)).toBe("Bad field");
+  });
+
+  it("dvPssErrorMessage extracts the PSS error message for PSS-shaped responses", () => {
+    const response = {
+      status: 400,
+      json: {
+        errorKey: "E_BATCHFAILED",
+        ErrorMessage: "One of the batch requests failed",
+        failedBatchRequestError: {
+          errorKey: "E_LIMITEXCEEDED_TASKLEVEL",
+          ErrorMessage: "Limit on level of task exceeded",
+        },
+      },
+    };
+    const msg = dvPssErrorMessage(response);
+    expect(msg).toContain("E_LIMITEXCEEDED_TASKLEVEL");
+    expect(msg).not.toBe("HTTP 400");
+  });
+});
+
+describe("validateUpdateEntities — null date guard", () => {
+  it("rejects null msdyn_start", () => {
+    expect(() =>
+      validateUpdateEntities([
+        { "@odata.type": TASK, msdyn_projecttaskid: guid(1), msdyn_start: null },
+      ]),
+    ).toThrow(/msdyn_start must not be null/);
+  });
+
+  it("rejects null msdyn_finish", () => {
+    expect(() =>
+      validateUpdateEntities([
+        { "@odata.type": TASK, msdyn_projecttaskid: guid(1), msdyn_finish: null },
+      ]),
+    ).toThrow(/msdyn_finish must not be null/);
+  });
+
+  it("accepts valid ISO date strings", () => {
+    expect(() =>
+      validateUpdateEntities([
+        { "@odata.type": TASK, msdyn_projecttaskid: guid(1), msdyn_start: "2026-07-01T00:00:00Z", msdyn_finish: "2026-07-05T00:00:00Z" },
+      ]),
+    ).not.toThrow();
   });
 });
 

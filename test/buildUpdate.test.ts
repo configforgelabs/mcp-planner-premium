@@ -85,4 +85,33 @@ describe("buildUpdateEntities", () => {
     const rename = buildUpdateEntities([{ taskId: ID, subject: "ok" }]);
     expect(() => validateUpdateEntities(rename.entities, [ID])).not.toThrow();
   });
+
+  it("skips null start with a warning instead of emitting null to PSS", () => {
+    const { entities, warnings } = buildUpdateEntities([
+      { taskId: ID, subject: "Keep", start: null as any },
+    ]);
+    expect("msdyn_start" in entities[0]).toBe(false);
+    expect(entities[0].msdyn_subject).toBe("Keep");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/start=null skipped/);
+  });
+
+  it("skips null finish with a warning instead of emitting null to PSS", () => {
+    const { entities, warnings } = buildUpdateEntities([
+      { taskId: ID, subject: "Keep", finish: null as any },
+    ]);
+    expect("msdyn_finish" in entities[0]).toBe(false);
+    expect(entities[0].msdyn_subject).toBe("Keep");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/finish=null skipped/);
+  });
+
+  it("emits date strings that are non-null normally", () => {
+    const { entities, warnings } = buildUpdateEntities([
+      { taskId: ID, start: "2026-07-01", finish: "2026-07-05" },
+    ]);
+    expect(entities[0].msdyn_start).toBe("2026-07-01");
+    expect(entities[0].msdyn_finish).toBe("2026-07-05");
+    expect(warnings).toHaveLength(0);
+  });
 });

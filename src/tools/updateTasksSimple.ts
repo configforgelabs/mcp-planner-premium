@@ -67,13 +67,17 @@ export function buildUpdateEntities(
       ent.msdyn_description = t.description;
       changed++;
     }
-    if (t.start !== undefined) {
+    if (t.start !== undefined && t.start !== null) {
       ent.msdyn_start = t.start;
       changed++;
+    } else if (t.start === null) {
+      warnings.push("tasks[" + i + "] (" + id + "): start=null skipped — PSS rejects null dates (returns 'Null object cannot be converted to a value type'). Omit the field instead.");
     }
-    if (t.finish !== undefined) {
+    if (t.finish !== undefined && t.finish !== null) {
       ent.msdyn_finish = t.finish;
       changed++;
+    } else if (t.finish === null) {
+      warnings.push("tasks[" + i + "] (" + id + "): finish=null skipped — PSS rejects null dates (returns 'Null object cannot be converted to a value type'). Omit the field instead.");
     }
     if (t.effortHours !== undefined) {
       ent.msdyn_effort = t.effortHours;
