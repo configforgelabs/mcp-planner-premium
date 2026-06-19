@@ -244,13 +244,13 @@ export function validateAddEntities(entities: any[]): void {
           );
         }
       }
-      // Optional lag: msdyn_linklagduration in minutes. Passed through unchanged.
-      const lag = ent.msdyn_linklagduration;
+      // Optional lag: msdyn_projecttaskdependencylinklag in minutes. Passed through unchanged.
+      const lag = ent.msdyn_projecttaskdependencylinklag;
       if (lag !== undefined && lag !== null && typeof lag !== "number") {
         throw new Error(
           "entities[" +
             i +
-            "] (dependency): msdyn_linklagduration must be a number (lag in minutes).",
+            "] (dependency): msdyn_projecttaskdependencylinklag must be a number (lag in minutes).",
         );
       }
     }
@@ -263,7 +263,7 @@ export const addTasks: ToolDef = {
   title: "Add Tasks to Plan (Batch)",
   description:
     "ADVANCED / raw path. For ordinary tasks, hierarchy and dependencies prefer add_tasks (you pass a plain list and the server builds this payload). Use this raw tool only when you need entity types add_tasks does not model (resource assignments, checklists, sprints, labels) or custom fields. " +
-    "Adds up to 200 items (tasks, dependencies, assignments, checklists) to a plan in ONE msdyn_PssCreateV2 call; requires an open change session (operationSetId). Tasks need msdyn_subject + project & bucket @odata.bind; use client-generated GUIDs so same-batch references work; order = display order. Hierarchy comes from msdyn_parenttask@odata.bind (parents BEFORE children in the same batch), NOT msdyn_outlinelevel (blocked on create). Dependencies default to FS; msdyn_projecttaskdependencylinktype supports FS/SS/FF/SF option values; lag via msdyn_linklagduration (minutes); invalid dependency fields are rejected, never silently dropped. msdyn_ismilestone, msdyn_progress and actuals are rejected on create - set them afterwards via 'Update Tasks in Plan (Batch)'. Submit each batch exactly once; nothing is saved until 'Apply Changes to Plan'.",
+    "Adds up to 200 items (tasks, dependencies, assignments, checklists) to a plan in ONE msdyn_PssCreateV2 call; requires an open change session (operationSetId). Tasks need msdyn_subject + project & bucket @odata.bind; use client-generated GUIDs so same-batch references work; order = display order. Hierarchy comes from msdyn_parenttask@odata.bind (parents BEFORE children in the same batch), NOT msdyn_outlinelevel (blocked on create). Dependencies default to FS; msdyn_projecttaskdependencylinktype supports FS/SS/FF/SF option values; lag via msdyn_projecttaskdependencylinklag (minutes); invalid dependency fields are rejected, never silently dropped. msdyn_ismilestone, msdyn_progress and actuals are rejected on create - set them afterwards via 'Update Tasks in Plan (Batch)'. Submit each batch exactly once; nothing is saved until 'Apply Changes to Plan'.",
   inputSchema: {
     operationSetId: z
       .string()

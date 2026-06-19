@@ -5,6 +5,13 @@ dist/
 .env.*
 .DS_Store
 
+
+test/e2e/fixtures/it-planner-board.json
+
+# PM acceptance reports contain real customer task names — keep local only
+pm-acceptance-report-*.md
+e2e-report-*.md
+
 # Claude Code: personal, per-user overrides (shared config lives in .claude/settings.json)
 .claude/settings.local.json
 

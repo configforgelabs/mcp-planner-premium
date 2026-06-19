@@ -76,8 +76,8 @@ export const getTask: ToolDef = {
         {
           url:
             BASE +
-            "/msdyn_projecttaskdependency?$select=_msdyn_predecessortask_value," +
-            "_msdyn_successortask_value,msdyn_projecttaskdependencylinktype,msdyn_linklagduration" +
+            "/msdyn_projecttaskdependencies?$select=_msdyn_predecessortask_value," +
+            "_msdyn_successortask_value,msdyn_projecttaskdependencylinktype,msdyn_projecttaskdependencylinklag" +
             "&$filter=_msdyn_predecessortask_value eq " +
             taskId +
             " or _msdyn_successortask_value eq " +
@@ -95,7 +95,7 @@ export const getTask: ToolDef = {
             predecessorTaskId: d._msdyn_predecessortask_value,
             successorTaskId: d._msdyn_successortask_value,
             type: linkTypeLabel(d.msdyn_projecttaskdependencylinktype),
-            lagMinutes: d.msdyn_linklagduration ?? null,
+            lagMinutes: d.msdyn_projecttaskdependencylinklag ?? null,
           };
           if (String(d._msdyn_successortask_value).toLowerCase() === taskId.toLowerCase())
             predecessors.push(link);

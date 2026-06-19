@@ -256,7 +256,7 @@ export function buildTaskEntities(
           throw new Error(
             "Task '" + t.ref + "': dependsOn.lagMinutes must be a number (minutes).",
           );
-        depEnt.msdyn_linklagduration = dep.lagMinutes;
+        depEnt.msdyn_projecttaskdependencylinklag = dep.lagMinutes;
       }
       depEntities.push(depEnt);
     }
@@ -410,6 +410,39 @@ export const addTasksSimple: ToolDef = {
 
     // Defense in depth: the built collection must still pass the raw guardrails.
     validateAddEntities(built.entities);
+
+    // Root-task auto-nesting trap: Planner's scheduling engine nests a *parentless*
+    // task under an existing task when the plan is NOT empty (it has no concept of
+    // "append at top level" on create). So top-level tasks added to a plan that
+    // already has tasks silently get nested — building a false deep spine and, at
+    // scale, tripping the max-task-level limit. We can't prevent it (outline level
+    // is blocked on create and un-parenting is blocked on update), so warn loudly.
+    const rootTasks = tasks.filter((t) => !t.parent);
+    if (rootTasks.length > 0) {
+      const probe = await dvReq(
+        {
+          url:
+            BASE +
+            "/msdyn_projecttasks?$select=msdyn_projecttaskid&$filter=_msdyn_project_value eq " +
+            projectId +
+            "&$top=1",
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      if (probe.status < 400 && (probe.json?.value?.length ?? 0) > 0) {
+        built.warnings.push(
+          rootTasks.length +
+            " task(s) in this batch have no parent, but the plan already contains tasks. " +
+            "Planner's scheduling engine will NEST these top-level tasks under an existing task instead of placing them at the top level. " +
+            "To add real top-level tasks reliably, create all roots in the FIRST batch of a new plan; otherwise give every task an explicit 'parent'. " +
+            "Affected refs: " +
+            rootTasks.map((t) => t.ref).slice(0, 20).join(", ") +
+            (rootTasks.length > 20 ? ", …" : "") + ".",
+        );
+      }
+    }
 
     const response = await dvReq({
       url: BASE + "/msdyn_PssCreateV2",

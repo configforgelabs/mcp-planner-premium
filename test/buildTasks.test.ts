@@ -137,7 +137,7 @@ describe("buildTaskEntities", () => {
     expect(built.dependencyIds).toHaveLength(1);
     expect(built.dependencyIds[0]).toBe(dep.msdyn_projecttaskdependencyid);;
     expect(dep.msdyn_projecttaskdependencylinktype).toBe(192350001); // SS
-    expect(dep.msdyn_linklagduration).toBe(120);
+    expect(dep.msdyn_projecttaskdependencylinklag).toBe(120);
     // PSS requires the project bind on the dependency entity. On
     // msdyn_projecttaskdependency, all lookup nav-properties use the PascalCase
     // schema name — msdyn_Project (capital P), not msdyn_project (lowercase).

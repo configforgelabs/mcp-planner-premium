@@ -24,8 +24,8 @@ export const listDependencies: ToolDef = {
       {
         url:
           BASE +
-          "/msdyn_projecttaskdependency?$select=_msdyn_predecessortask_value," +
-          "_msdyn_successortask_value,msdyn_projecttaskdependencylinktype,msdyn_linklagduration" +
+          "/msdyn_projecttaskdependencies?$select=_msdyn_predecessortask_value," +
+          "_msdyn_successortask_value,msdyn_projecttaskdependencylinktype,msdyn_projecttaskdependencylinklag" +
           "&$filter=_msdyn_project_value eq " +
           projectId +
           "&$top=2000",
@@ -74,7 +74,7 @@ export const listDependencies: ToolDef = {
       successorTaskId: d._msdyn_successortask_value,
       successorSubject: name(d._msdyn_successortask_value),
       type: linkTypeLabel(d.msdyn_projecttaskdependencylinktype),
-      lagMinutes: d.msdyn_linklagduration ?? null,
+      lagMinutes: d.msdyn_projecttaskdependencylinklag ?? null,
     }));
 
     return { ok: true, projectId, count: dependencies.length, dependencies, warnings };
