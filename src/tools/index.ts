@@ -17,6 +17,7 @@ import { findTeamMember } from "./findTeamMember.js";
 import { getPlanContents } from "./getPlanContents.js";
 import { whoami } from "./whoami.js";
 import { listPlans } from "./listPlans.js";
+import { listMyTasks } from "./listMyTasks.js";
 import { getPlanSummary } from "./getPlanSummary.js";
 import { getTask } from "./getTask.js";
 import { listPlanTasks } from "./listPlanTasks.js";
@@ -50,6 +51,7 @@ export const allTools: ToolDef[] = [
   // Reporting / read tools (replace the generic Dataverse MCP for the Planner
   // workflow). All read-only.
   listPlans,
+  listMyTasks,
   getPlanSummary,
   getTask,
   listPlanTasks,
@@ -77,6 +79,7 @@ export const toolAnnotations: Record<string, ToolAnnotations> = {
   check_change_session_status: RO,
   whoami: RO,
   list_plans: RO,
+  list_my_tasks: RO,
   get_plan_summary: RO,
   get_task: RO,
   list_plan_tasks: RO,
