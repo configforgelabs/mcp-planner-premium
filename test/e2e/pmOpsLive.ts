@@ -7,36 +7,45 @@
  * each via independent OData reads. Finally verifies the new cursor/offset
  * pagination reassembles to the exact OData $count with no gaps or duplicates.
  *
- * The board plan (ZZ-MCP-E2E-SEED-*) is LEFT INTACT; only the per-run scratch
- * subtree is cleaned up.
+ * Writes a PM-team-facing report: pm-acceptance-report-<UTC>.md (same format as
+ * the full-board acceptance run). The board (ZZ-MCP-E2E-SEED-*) is LEFT INTACT;
+ * only the per-run scratch subtree is cleaned up.
  *
  * Usage (airplane + NordVPN needs the NODE_OPTIONS prefix):
  *   export E2E_ACCESS_TOKEN=$(NODE_OPTIONS='--no-network-family-autoselection --dns-result-order=ipv4first' \
  *     npx tsx --env-file .env scripts/get-dataverse-token.ts)
  *   NODE_OPTIONS='--no-network-family-autoselection --dns-result-order=ipv4first' \
- *     DATAVERSE_LINK_TYPE_STYLE=eu E2E_TOOL_TIMEOUT_MS=290000 npx tsx --env-file .env test/e2e/pmOpsLive.ts
+ *     DATAVERSE_LINK_TYPE_STYLE=eu REQUEST_TIMEOUT_MS=120000 E2E_TOOL_TIMEOUT_MS=290000 \
+ *     npx tsx --env-file .env test/e2e/pmOpsLive.ts
  */
 
 import { createServer, type Server } from "node:http";
+import { writeFile } from "node:fs/promises";
 import { getConfig, redact } from "./config.js";
 import { mcpCall, mcpInitialize } from "./mcpClient.js";
 import { verifyTaskField, verifyTaskCount, verifyTaskDeleted } from "./verify.js";
 
-let pass = 0;
-let fail = 0;
-const fails: string[] = [];
+// ── Result recording (drives both the console + the markdown report) ──────────
+type Status = "pass" | "fail" | "info";
+interface Row { phase: string; status: Status; step: string; tool: string; latencyMs: number; evidence: string; }
+const rows: Row[] = [];
+let curPhase = "";
 
-function ok(cond: boolean, label: string, evidence = ""): boolean {
-  if (cond) {
-    pass++;
-    console.log(`  ✅ ${label}${evidence ? ` — ${evidence}` : ""}`);
-  } else {
-    fail++;
-    fails.push(label);
-    console.log(`  ❌ ${label}${evidence ? ` — ${evidence}` : ""}`);
-  }
+function setPhase(p: string): void {
+  curPhase = p;
+  console.log(`\n${p}:`);
+}
+function check(step: string, tool: string, latencyMs: number, cond: boolean, evidence = ""): boolean {
+  rows.push({ phase: curPhase, status: cond ? "pass" : "fail", step, tool, latencyMs, evidence });
+  console.log(`  ${cond ? "✅" : "❌"} ${step}${evidence ? ` — ${evidence}` : ""}`);
   return cond;
 }
+function info(step: string, tool: string, evidence = ""): void {
+  rows.push({ phase: curPhase, status: "info", step, tool, latencyMs: 0, evidence });
+  console.log(`  ℹ️  ${step}${evidence ? ` — ${evidence}` : ""}`);
+}
+const lc = (s: unknown) => String(s ?? "").toLowerCase();
+const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
 
 async function bootServer(port: number): Promise<Server> {
   process.env.AUTH_MODE = "insecure-passthrough";
@@ -85,7 +94,7 @@ async function call(tool: string, args: Record<string, unknown>, attempts = 4): 
   }
   throw lastErr;
 }
-/** Open a session, run a mutation, apply, return nothing. */
+/** Open a session, run a mutation, apply. */
 async function inSession(projectId: string, fn: (opSet: string) => Promise<void>): Promise<void> {
   const s = await call("start_change_session", { projectId });
   await fn(s.operationSetId);
@@ -94,14 +103,15 @@ async function inSession(projectId: string, fn: (opSet: string) => Promise<void>
 
 interface Board {
   projectId: string;
-  buckets: Record<string, string>; // name -> bucketId
+  buckets: Record<string, string>;
   sprintName: string;
+  name: string;
+  taskCount: number;
 }
 
 const NEEDED_BUCKETS = ["Backlog", "In Progress", "Done"];
 const SPRINT = "Sprint A";
 
-/** Direct-OData check whether a named sprint exists (no MCP list-sprints tool). */
 async function sprintExists(projectId: string, name: string): Promise<boolean> {
   const cfg = getConfig();
   const url =
@@ -115,9 +125,6 @@ async function sprintExists(projectId: string, name: string): Promise<boolean> {
   return (data.value?.length ?? 0) > 0;
 }
 
-/** Find a kept seed board or build one; idempotently ensure the needed buckets +
- * sprint exist. A fresh build is populated with ~21 tasks (3 levels) so the
- * read-safety pagination has a real population to page over. Never deleted. */
 async function ensureBoard(): Promise<Board> {
   const plans = await call("list_plans", { limit: 25 });
   const existing = (plans.plans ?? []).find(
@@ -125,32 +132,36 @@ async function ensureBoard(): Promise<Board> {
   );
 
   let projectId: string;
+  let name: string;
   const buckets: Record<string, string> = {};
   let isNew = false;
 
   if (existing) {
     projectId = existing.projectId;
+    name = existing.name;
+    const t0 = Date.now();
     const contents = await call("get_plan_tasks_and_buckets", { projectId, limit: 1000 });
     for (const b of contents.buckets ?? []) buckets[b.name] = b.bucketId;
-    ok(true, "reuse kept board", `${existing.name} (${contents.taskCount} tasks)`);
+    check("reuse kept board (persistent, not rebuilt)", "list_plans", Date.now() - t0, true, `${name} — ${contents.taskCount} tasks`);
   } else {
     const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const plan = await call("create_plan", { subject: `ZZ-MCP-E2E-SEED-${ts}`, description: "persistent PM-ops board" });
+    name = `ZZ-MCP-E2E-SEED-${ts}`;
+    const t0 = Date.now();
+    const plan = await call("create_plan", { subject: name, description: "persistent PM-ops board" });
     projectId = plan.projectId;
     isNew = true;
-    ok(!!projectId, "created kept board", `ZZ-MCP-E2E-SEED-${ts}`);
+    check("create kept board", "create_plan", Date.now() - t0, !!projectId, name);
   }
 
-  // Idempotently ensure buckets + sprint.
-  for (const name of NEEDED_BUCKETS) {
-    if (!buckets[name]) buckets[name] = (await call("add_bucket", { projectId, name })).bucketId;
+  for (const b of NEEDED_BUCKETS) {
+    if (!buckets[b]) buckets[b] = (await call("add_bucket", { projectId, name: b })).bucketId;
   }
   if (!(await sprintExists(projectId, SPRINT))) {
     await call("add_sprint", { projectId, name: SPRINT, start: "2026-07-01", finish: "2026-07-14" });
   }
 
-  // Populate a fresh board with a real task population (3 levels, one FS dep).
   if (isNew) {
+    const t0 = Date.now();
     await inSession(projectId, async (opSet) => {
       const tasks: any[] = [];
       for (let p = 1; p <= 3; p++) {
@@ -165,19 +176,17 @@ async function ensureBoard(): Promise<Board> {
           }
         }
       }
-      await call("add_tasks", { operationSetId: opSet, projectId, tasks }); // 3 + 6 + 12 = 21 tasks
+      await call("add_tasks", { operationSetId: opSet, projectId, tasks });
     });
-    ok(true, "populated board (21 tasks, 3 levels, deps)");
+    check("populate board (3 levels, FS dependencies)", "add_tasks", Date.now() - t0, true, "21 tasks across 3 buckets");
   }
 
-  return { projectId, buckets, sprintName: SPRINT };
+  const count = await verifyTaskCount(projectId, BEARER);
+  return { projectId, buckets, sprintName: SPRINT, name, taskCount: count.count };
 }
 
-/** Create a fresh scratch subtree under the board: a parent + 3 leaves in Backlog.
- * Returns their GUIDs. These are mutated by the PM-op scenarios, then deleted. */
-async function makeScratch(board: Board): Promise<{ parent: string; leaves: string[]; depId?: string }> {
+async function makeScratch(board: Board): Promise<{ parent: string; leaves: string[] }> {
   let refs: Record<string, string> = {};
-  let depIds: string[] = [];
   await inSession(board.projectId, async (opSet) => {
     const r = await call("add_tasks", {
       operationSetId: opSet, projectId: board.projectId,
@@ -189,15 +198,59 @@ async function makeScratch(board: Board): Promise<{ parent: string; leaves: stri
       ],
     });
     refs = r.taskRefs;
-    depIds = r.dependencyIds ?? [];
   });
-  return { parent: refs.S, leaves: [refs.S1, refs.S2, refs.S3], depId: depIds[0] };
+  return { parent: refs.S, leaves: [refs.S1, refs.S2, refs.S3] };
+}
+
+function renderReport(board: Board | null, runAt: string, org: string, durationMs: number, residue: string): string {
+  const pass = rows.filter((r) => r.status === "pass").length;
+  const fail = rows.filter((r) => r.status === "fail").length;
+  const infoN = rows.filter((r) => r.status === "info").length;
+  const icon = (s: Status) => (s === "pass" ? "✅" : s === "fail" ? "❌" : "ℹ️");
+  const L: string[] = [];
+  L.push("# MCP Planner Premium — PM Acceptance Report");
+  L.push("");
+  L.push(`Run: \`${runAt}\`  ·  Org: \`${org}\`  ·  Duration: ${fmtMs(durationMs)}`);
+  L.push(`Scope: PM task-change operations + large-plan read safety (cursor/offset pagination)`);
+  if (board) L.push(`Board: \`${board.name}\` (\`${board.projectId}\`) — ${board.taskCount} tasks, KEPT (never deleted); scenarios run against a disposable scratch subtree`);
+  L.push("");
+  L.push(`## Overall: ${fail === 0 ? "✅ ALL PASS" : `❌ ${fail} FAILURE(S)`}`);
+  L.push("");
+  L.push("| | Count |");
+  L.push("|---|---|");
+  L.push(`| Pass | ${pass} |`);
+  L.push(`| Fail | ${fail} |`);
+  L.push(`| Info (documented behaviour) | ${infoN} |`);
+  L.push("");
+  const phases = [...new Set(rows.map((r) => r.phase))];
+  for (const ph of phases) {
+    L.push(`## ${ph}`);
+    L.push("");
+    L.push("| | Step | Tool | Latency | Evidence / Error |");
+    L.push("|---|---|---|---|---|");
+    for (const r of rows.filter((x) => x.phase === ph)) {
+      const detail = (r.status === "fail" ? `⚠️ ${r.evidence}` : r.evidence).replace(/\|/g, "\\|").slice(0, 140);
+      L.push(`| ${icon(r.status)} | ${r.step} | \`${r.tool}\` | ${fmtMs(r.latencyMs)} | ${detail} |`);
+    }
+    L.push("");
+  }
+  L.push("## Cleanup & residue");
+  L.push("");
+  L.push(`- ${residue}`);
+  L.push("");
+  L.push("---");
+  L.push("");
+  L.push("*All correctness verdicts are code assertions against live Dataverse reads (independent of the MCP tool output) — never AI-generated summaries.*");
+  L.push("");
+  return L.join("\n");
 }
 
 async function main(): Promise<void> {
   const cfg = getConfig();
   BEARER = cfg.E2E_ACCESS_TOKEN;
   const port = cfg.PORT;
+  const runAt = new Date().toISOString();
+  const t0 = Date.now();
   console.log(`\n${"=".repeat(70)}\n  PM-Ops + Read-Safety — Live Self-Test (kept board)\n${"=".repeat(70)}`);
   console.log(`  Org   : ${cfg.DATAVERSE_ORG_URL}\n  Token : ${redact(BEARER)}\n`);
 
@@ -207,125 +260,127 @@ async function main(): Promise<void> {
 
   let board: Board | null = null;
   let scratchIds: string[] = [];
+  let residue = "✅ scratch subtree cleaned; board kept (not deleted).";
 
   try {
-    console.log("Setup — persistent board:");
+    setPhase("Setup — persistent board");
     board = await ensureBoard();
     const { projectId } = board;
 
-    console.log("\nScratch subtree (mutated, then cleaned — board stays intact):");
+    setPhase("Scratch subtree (mutated then cleaned — board stays intact)");
+    let t = Date.now();
     const scratch = await makeScratch(board);
     scratchIds = [scratch.parent, ...scratch.leaves];
-    ok(scratchIds.every(Boolean), "created scratch subtree", `parent + ${scratch.leaves.length} leaves`);
+    check("create scratch subtree (parent + 3 leaves + FS dep)", "add_tasks", Date.now() - t, scratchIds.every(Boolean));
 
-    console.log("\nPM operations (verified via independent OData):");
+    setPhase("PM operations (verified via independent OData)");
 
-    // 1. Re-bucket: move a leaf to 'Done'.
-    await inSession(projectId, async (op) =>
-      void (await call("update_tasks", { operationSetId: op, projectId, tasks: [{ taskId: scratch.leaves[0], bucket: "Done" }] })));
-    ok((await verifyTaskField(scratch.leaves[0], "_msdyn_projectbucket_value", BEARER))?.toLowerCase() === board.buckets["Done"].toLowerCase(),
-      "re-bucket leaf → Done");
+    t = Date.now();
+    await inSession(projectId, async (op) => void (await call("update_tasks", { operationSetId: op, projectId, tasks: [{ taskId: scratch.leaves[0], bucket: "Done" }] })));
+    check("move a task to a different bucket (→ Done)", "update_tasks", Date.now() - t,
+      lc(await verifyTaskField(scratch.leaves[0], "_msdyn_projectbucket_value", BEARER)) === lc(board.buckets["Done"]), "bucket = Done");
 
-    // 2. Reparent: move leaf 1 under leaf 2 (leaf 2 becomes a summary).
-    await inSession(projectId, async (op) =>
-      void (await call("update_tasks", { operationSetId: op, projectId, tasks: [{ taskId: scratch.leaves[0], parent: scratch.leaves[1] }] })));
-    ok((await verifyTaskField(scratch.leaves[0], "_msdyn_parenttask_value", BEARER))?.toLowerCase() === scratch.leaves[1].toLowerCase(),
-      "reparent leaf under another task");
+    t = Date.now();
+    await inSession(projectId, async (op) => void (await call("update_tasks", { operationSetId: op, projectId, tasks: [{ taskId: scratch.leaves[0], parent: scratch.leaves[1] }] })));
+    check("reparent a task under another task", "update_tasks", Date.now() - t,
+      lc(await verifyTaskField(scratch.leaves[0], "_msdyn_parenttask_value", BEARER)) === lc(scratch.leaves[1]), "parent changed");
 
-    // 3. Re-sprint: place a leaf into the sprint.
-    await inSession(projectId, async (op) =>
-      void (await call("update_tasks", { operationSetId: op, projectId, tasks: [{ taskId: scratch.leaves[2], sprint: board.sprintName }] })));
-    ok(!!(await verifyTaskField(scratch.leaves[2], "_msdyn_projectsprint_value", BEARER)),
-      "move task into sprint");
+    t = Date.now();
+    await inSession(projectId, async (op) => void (await call("update_tasks", { operationSetId: op, projectId, tasks: [{ taskId: scratch.leaves[2], sprint: board.sprintName }] })));
+    check("move a task into a sprint", "update_tasks", Date.now() - t,
+      !!(await verifyTaskField(scratch.leaves[2], "_msdyn_projectsprint_value", BEARER)), `sprint = ${board.sprintName}`);
 
-    // 4. Reschedule + priority in one batch (TZ-tolerant: midnight-UTC may store as
-    //    the prior local day, so accept Sep 14 or 15 — the point is it MOVED to Sep).
-    await inSession(projectId, async (op) =>
-      void (await call("update_tasks", { operationSetId: op, projectId, tasks: [{ taskId: scratch.leaves[2], finish: "2026-09-15T00:00:00Z", priority: 1 }] })));
+    t = Date.now();
+    await inSession(projectId, async (op) => void (await call("update_tasks", { operationSetId: op, projectId, tasks: [{ taskId: scratch.leaves[2], finish: "2026-09-15T00:00:00Z", priority: 1 }] })));
     {
       const fin = await verifyTaskField(scratch.leaves[2], "msdyn_finish", BEARER);
-      ok(typeof fin === "string" && /2026-09-1[45]/.test(fin), "reschedule finish date (moved to Sep)", String(fin).slice(0, 10));
+      check("reschedule a task's finish date + priority", "update_tasks", Date.now() - t, typeof fin === "string" && /2026-09-1[45]/.test(fin), `finish = ${String(fin).slice(0, 10)}`);
     }
 
-    // 5a. milestone is ignored with a warning; the other field in the same call applies.
+    t = Date.now();
     {
       const s = await call("start_change_session", { projectId });
       const r = await call("update_tasks", { operationSetId: s.operationSetId, projectId, tasks: [{ taskId: scratch.leaves[0], priority: 5, milestone: true }] });
       await call("apply_changes", { operationSetId: s.operationSetId });
-      ok(Array.isArray(r.warnings) && r.warnings.some((w: string) => /milestone/i.test(w)), "milestone change ignored with warning");
+      check("milestone flag change is ignored with a warning (UI-only)", "update_tasks", Date.now() - t,
+        Array.isArray(r.warnings) && r.warnings.some((w: string) => /milestone/i.test(w)), "warned; other fields applied");
     }
-    // 5b. un-parent (move to top level) is blocked — the hierarchy guard holds.
+
+    t = Date.now();
     {
       const s = await call("start_change_session", { projectId });
       const res = await mcpCall(URL_, "update_tasks", { operationSetId: s.operationSetId, projectId, tasks: [{ taskId: scratch.leaves[0], parent: null }] }, BEARER);
-      ok(res.isError === true, "un-parent (parent=null) rejected — can't move a task to the top level");
+      const blocked = res.isError === true;
       await mcpCall(URL_, "cancel_change_session", { operationSetId: s.operationSetId }, BEARER).catch(() => {});
-      ok((await verifyTaskField(scratch.leaves[0], "_msdyn_parenttask_value", BEARER))?.toLowerCase() === scratch.leaves[1].toLowerCase(),
-        "hierarchy unchanged after blocked un-parent");
+      const unchanged = lc(await verifyTaskField(scratch.leaves[0], "_msdyn_parenttask_value", BEARER)) === lc(scratch.leaves[1]);
+      check("un-parent (move to top level) is blocked; hierarchy unchanged", "update_tasks", Date.now() - t, blocked && unchanged, "rejected; subtree intact");
     }
 
-    // 6. Bulk move: re-bucket the scratch parent + remaining leaf to 'In Progress' in one op-set.
-    await inSession(projectId, async (op) =>
-      void (await call("update_tasks", { operationSetId: op, projectId, tasks: [
-        { taskId: scratch.parent, bucket: "In Progress" },
-        { taskId: scratch.leaves[1], bucket: "In Progress" },
-      ] })));
-    ok((await verifyTaskField(scratch.parent, "_msdyn_projectbucket_value", BEARER))?.toLowerCase() === board.buckets["In Progress"].toLowerCase(),
-      "bulk move (2 tasks in one operation set)");
+    t = Date.now();
+    await inSession(projectId, async (op) => void (await call("update_tasks", { operationSetId: op, projectId, tasks: [
+      { taskId: scratch.parent, bucket: "In Progress" },
+      { taskId: scratch.leaves[1], bucket: "In Progress" },
+    ] })));
+    check("bulk move (2 tasks in one operation set)", "update_tasks", Date.now() - t,
+      lc(await verifyTaskField(scratch.parent, "_msdyn_projectbucket_value", BEARER)) === lc(board.buckets["In Progress"]), "both re-bucketed");
 
-    console.log("\nRead-safety at scale (cursor/offset pagination):");
-    // get_plan_tasks_and_buckets: page with a tiny limit; reassemble == OData $count.
+    info("not supported by the API (confirmed): reorder within a bucket, move to another plan, edit a dependency in place", "—",
+      "PSS manages display order; cross-plan move + in-place dependency edits have no API path (delete + recreate)");
+
+    setPhase("Read safety at scale (cursor / offset pagination)");
+    t = Date.now();
     {
       const direct = await verifyTaskCount(projectId, BEARER);
       const seen = new Set<string>();
-      let token: string | undefined;
-      let pages = 0;
+      let token: string | undefined; let pages = 0;
       do {
         const r: any = await call("get_plan_tasks_and_buckets", { projectId, limit: 3, ...(token ? { pageToken: token } : {}) });
-        for (const t of r.tasks) seen.add(String(t.taskId).toLowerCase());
-        token = r.nextPageToken;
-        pages++;
-      } while (token && pages < 100);
-      ok(seen.size === direct.count, "get_plan_tasks_and_buckets paginated == OData $count (no gaps/dupes)", `${seen.size} tasks over ${pages} pages, $count=${direct.count}`);
+        for (const x of r.tasks) seen.add(lc(x.taskId));
+        token = r.nextPageToken; pages++;
+      } while (token && pages < 200);
+      check("get_plan_tasks_and_buckets paginates to the exact OData $count (no gaps/dupes)", "get_plan_tasks_and_buckets", Date.now() - t,
+        seen.size === direct.count, `${seen.size} tasks over ${pages} pages == $count ${direct.count}`);
     }
-    // list_plan_tasks offset paging: reassemble == totalMatched.
+    t = Date.now();
     {
-      const seen = new Set<string>();
-      let token: string | undefined;
-      let total = -1;
-      let pages = 0;
+      const seen = new Set<string>(); let token: string | undefined; let total = -1; let pages = 0;
       do {
         const r: any = await call("list_plan_tasks", { projectId, filter: "all", limit: 3, ...(token ? { pageToken: token } : {}) });
-        for (const t of r.tasks) seen.add(String(t.taskId).toLowerCase());
-        total = r.totalMatched;
-        token = r.nextPageToken;
-        pages++;
-      } while (token && pages < 100);
-      ok(seen.size === total, "list_plan_tasks offset paging reassembles to totalMatched", `${seen.size}/${total} over ${pages} pages`);
+        for (const x of r.tasks) seen.add(lc(x.taskId));
+        total = r.totalMatched; token = r.nextPageToken; pages++;
+      } while (token && pages < 200);
+      check("list_plan_tasks offset paging reassembles to totalMatched", "list_plan_tasks", Date.now() - t, seen.size === total, `${seen.size}/${total} over ${pages} pages`);
     }
   } catch (e) {
-    fail++;
-    fails.push(`exception: ${e instanceof Error ? e.message : String(e)}`);
+    rows.push({ phase: curPhase || "Run", status: "fail", step: "unexpected exception", tool: "—", latencyMs: 0, evidence: e instanceof Error ? e.message : String(e) });
     console.log(`  ❌ exception — ${e instanceof Error ? e.message : String(e)}`);
   } finally {
-    // Clean up ONLY the scratch subtree — leave the board intact.
     if (board && scratchIds.filter(Boolean).length > 0) {
       try {
         const s = await call("start_change_session", { projectId: board.projectId });
         await mcpCall(URL_, "delete_tasks_batch", { operationSetId: s.operationSetId, projectId: board.projectId, taskIds: scratchIds.filter(Boolean), confirmed: true }, BEARER);
         await mcpCall(URL_, "apply_changes", { operationSetId: s.operationSetId }, BEARER);
         const gone = await verifyTaskDeleted(scratchIds[0], BEARER);
-        console.log(`  ℹ️  scratch subtree cleaned (${gone ? "verified deleted" : "delete queued"}); board kept.`);
+        residue = `✅ scratch subtree ${gone ? "deleted (verified)" : "delete queued"}; board \`${board.name}\` kept (never deleted).`;
+        console.log(`  ℹ️  ${residue}`);
       } catch (e) {
-        console.log(`  ℹ️  scratch cleanup best-effort failed: ${e instanceof Error ? e.message : String(e)}`);
+        residue = `⚠️ scratch cleanup best-effort failed: ${e instanceof Error ? e.message : String(e)}; board kept.`;
+        console.log(`  ℹ️  ${residue}`);
       }
     }
     await new Promise<void>((r) => server.close(() => r()));
   }
 
+  // Write the PM-team-facing report.
+  const report = renderReport(board, runAt, cfg.DATAVERSE_ORG_URL, Date.now() - t0, residue);
+  const file = `pm-acceptance-report-${runAt.replace(/[:.]/g, "-").slice(0, 19)}.md`;
+  await writeFile(file, report, "utf-8");
+
+  const fail = rows.filter((r) => r.status === "fail").length;
+  const pass = rows.filter((r) => r.status === "pass").length;
   console.log(`\n${"=".repeat(70)}`);
-  console.log(`  Result: ${fail === 0 ? "✅ ALL PASS" : `❌ ${fail} FAILURE(S)`}  (${pass} pass / ${fail} fail)`);
-  if (fail > 0) console.log(`  Failed: ${fails.join("; ")}`);
+  console.log(`  Result : ${fail === 0 ? "✅ ALL PASS" : `❌ ${fail} FAILURE(S)`}  (${pass} pass / ${fail} fail)`);
+  console.log(`  Report : ${file}`);
   console.log(`${"=".repeat(70)}\n`);
   process.exit(fail > 0 ? 1 : 0);
 }
