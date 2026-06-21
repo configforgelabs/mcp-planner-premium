@@ -2,6 +2,7 @@ import { z } from "zod";
 import { getApiBase } from "../config.js";
 import { dvReq, dvHeaders, dvErrorMessage, asArray, assertGuid } from "../dataverse.js";
 import type { ToolDef } from "./types.js";
+import { logger } from "../logger.js";
 
 const DELETABLE = [
   "msdyn_projecttask",
@@ -12,6 +13,40 @@ const DELETABLE = [
   "msdyn_projectchecklist",
   "msdyn_projecttasktolabel",
 ];
+
+/**
+ * Given a set of task ids being deleted (lowercase) and the raw dependency rows
+ * fetched from Dataverse, returns the list of dependency record descriptors whose
+ * predecessor OR successor is in the delete set. De-dupes against already-provided
+ * caller record ids. Pure and unit-testable — no network.
+ *
+ * depRows: raw objects with { msdyn_projecttaskdependencyid, _msdyn_predecessortask_value,
+ *   _msdyn_successortask_value }.
+ * callerRecordIds: set of already-queued recordIds (lowercase) to avoid double-deletion.
+ */
+export function selectDependenciesToDelete(
+  taskIds: Set<string>,
+  depRows: {
+    msdyn_projecttaskdependencyid: string;
+    _msdyn_predecessortask_value: string;
+    _msdyn_successortask_value: string;
+  }[],
+  callerRecordIds: Set<string> = new Set(),
+): { entityLogicalName: "msdyn_projecttaskdependency"; recordId: string }[] {
+  const result: { entityLogicalName: "msdyn_projecttaskdependency"; recordId: string }[] = [];
+  for (const dep of depRows) {
+    const depId = String(dep.msdyn_projecttaskdependencyid || "");
+    if (!depId) continue;
+    const depIdLo = depId.toLowerCase();
+    if (callerRecordIds.has(depIdLo)) continue; // already queued by caller
+    const pred = String(dep._msdyn_predecessortask_value || "").toLowerCase();
+    const succ = String(dep._msdyn_successortask_value || "").toLowerCase();
+    if (taskIds.has(pred) || taskIds.has(succ)) {
+      result.push({ entityLogicalName: "msdyn_projecttaskdependency", recordId: depId });
+    }
+  }
+  return result;
+}
 
 /**
  * Converts the internal record list to the OData entity objects msdyn_PssDeleteV2
@@ -144,7 +179,7 @@ export const deleteTasks: ToolDef = {
   name: "delete_tasks_batch",
   title: "Delete Tasks from Plan (Batch)",
   description:
-    "Deletes up to 200 items (tasks, dependencies, assignments, buckets, checklists) in ONE call via msdyn_PssDeleteV2, inside an open change session. REQUIRES confirmed=true after an explicit per-record user confirmation. Provide at least one of taskIds (task GUIDs) or records. When projectId is given with taskIds, the server fetches the plan hierarchy and automatically sorts the delete batch leaves-first (children before parents) — PSS requires this order or it returns E_INVALIDENTITYUID mid-batch. Deleting whole plans is hard-blocked by policy. Deletions are saved only after 'Apply Changes to Plan'.",
+    "Deletes up to 200 items (tasks, dependencies, assignments, buckets, checklists) in ONE call via msdyn_PssDeleteV2, inside an open change session. REQUIRES confirmed=true after an explicit per-record user confirmation. Provide at least one of taskIds (task GUIDs) or records. When projectId is given with taskIds, the server (1) fetches the plan hierarchy and automatically sorts the delete batch leaves-first (children before parents), and (2) auto-fetches any msdyn_projecttaskdependency rows that reference the to-be-deleted tasks and prepends those deletes automatically — you do NOT need to pass dependency GUIDs separately when projectId is supplied. Auto-fetched dependencies count toward the 200-entity cap. Deleting whole plans is hard-blocked by policy. Deletions are saved only after 'Apply Changes to Plan'.",
   inputSchema: {
     operationSetId: z
       .string()
@@ -228,16 +263,75 @@ export const deleteTasks: ToolDef = {
       // If the fetch fails, proceed with caller order (best-effort).
     }
 
+    // Auto-cascade: when projectId is provided and we have task ids to delete,
+    // fetch all dependency rows that reference those tasks and queue their deletes
+    // BEFORE the task deletes. PSS returns E_INVALIDENTITYUID if a dependency row
+    // still references a task being deleted. This is best-effort: a 4xx from the
+    // read falls back to the manual caller-supplied path and appends a warning.
+    const autoCascadedDeps: { entityLogicalName: string; recordId: string }[] = [];
+    if (taskIdList.length > 0 && input.projectId) {
+      const projIdForDeps = assertGuid(String(input.projectId), "projectId");
+      const deleteSet = new Set(taskIdList.map((id) => id.toLowerCase()));
+      try {
+        const depRes = await dvReq(
+          {
+            url:
+              BASE +
+              "/msdyn_projecttaskdependencies?$select=msdyn_projecttaskdependencyid," +
+              "_msdyn_predecessortask_value,_msdyn_successortask_value" +
+              "&$filter=_msdyn_project_value eq " +
+              projIdForDeps +
+              "&$top=5000",
+            method: "GET",
+            headers: dvHeaders(),
+          },
+          { retry: true },
+        );
+        if (depRes.status < 400) {
+          const rows = depRes.json?.value ?? [];
+          if (rows.length >= 5000) {
+            logger.warn(
+              { projectId: projIdForDeps },
+              "delete_tasks_batch: dependency fetch returned 5000 rows (may be truncated); some auto-cascaded deps may be missing",
+            );
+          }
+          autoCascadedDeps.push(...selectDependenciesToDelete(deleteSet, rows));
+        } else {
+          logger.warn(
+            { status: depRes.status },
+            "delete_tasks_batch: could not auto-fetch dependencies (non-2xx); pass dependency GUIDs in records if PSS rejects the delete",
+          );
+        }
+      } catch (err: unknown) {
+        logger.warn(
+          { err },
+          "delete_tasks_batch: dependency fetch threw; falling back to caller-supplied records only",
+        );
+      }
+    }
+
     const records: { entityLogicalName: string; recordId: string }[] = [];
     // Non-task records (dependencies, assignments, etc.) must come BEFORE task
     // records — PSS rejects task deletion if a dependency entity still references
     // the task, returning E_INVALIDENTITYUID mid-batch.
+    // Auto-cascaded dependency records go first (discovered automatically when
+    // projectId was supplied), followed by any caller-supplied records (which may
+    // also contain non-task items like assignments), then tasks last.
+    for (const dep of autoCascadedDeps) records.push(dep);
+    // Build caller-record id set for de-dupe (autoCascadedDeps already avoided
+    // these, but we also need to track them for validateDeleteRecords ordering).
     if (input.records !== undefined && input.records !== null) {
       const raw = asArray<{ entityLogicalName: string; recordId: string }>(
         input.records,
         "records",
       );
-      for (const r of raw) records.push(r);
+      for (const r of raw) {
+        // Skip if the auto-cascade already queued this dep id (de-dupe).
+        const isDupDep = autoCascadedDeps.some(
+          (d) => d.recordId.toLowerCase() === String(r.recordId || "").toLowerCase(),
+        );
+        if (!isDupDep) records.push(r);
+      }
     }
     for (const id of taskIdList)
       records.push({ entityLogicalName: "msdyn_projecttask", recordId: id });

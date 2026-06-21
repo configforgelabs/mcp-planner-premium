@@ -29,7 +29,7 @@ MCP host (OAuth client)
         |
         v
 this server (stateless, streamable HTTP)
-   - 25 tools (incl. whoami diagnostic)
+   - 29 tools (incl. whoami diagnostic)
    - validates then forwards the inbound bearer to Dataverse
         |
         v
@@ -107,6 +107,10 @@ means the server is not dangerous even when used from a host with no skill loade
 | `list_dependencies` | All predecessor→successor links (type + lag) — read |
 | `list_team_members` | All plan team members — read |
 | `describe_option_set` | Choice-column values + labels (e.g. link types, status) — read |
+| `get_critical_path` | Critical-path chain with per-task total float (slack) in working days — read |
+| `get_schedule_health` | Schedule-risk rollup: overdue, at-risk, blocked, milestones, slipping summaries — read |
+| `get_resource_workload` | Per-team-member assigned-task count, effort hours, and overdue count — read |
+| `assign_task` | Assign or unassign a project-team member on an existing task (requires `confirmed=true` to unassign) — destructive |
 
 ## Ergonomic vs. raw task creation
 
@@ -174,6 +178,14 @@ container loudly instead of failing per-request).
 | `RATE_LIMIT_PER_MIN` | no | `120` | Per-IP requests/min on `/mcp` |
 | `JSON_BODY_LIMIT` | no | `2mb` | Max request body |
 | `LOG_LEVEL` | no | `info` | pino level |
+| `READ_ONLY_MODE` | no | `false` | When `true`, exposes only the 17 read-only tools and hard-rejects any write/session tool call. Useful for a reporting-only deployment. Accepts `true/1/yes/on` (case-insensitive); invalid values crash at boot. |
+| `ENABLED_TOOLS` | no | — | Comma-separated allowlist of exact tool names. When set, only those tools are exposed. Unknown names crash at boot (fail-closed). |
+| `TOOLSETS` | no | — | Comma-separated list of named tool groups to expose: `reporting` (list views), `discovery` (lookup/identity), `sessions` (change-session lifecycle), `write` (structural writes), `analytics` (schedule and resource insights — overlaps `reporting`). Union of all selected groups is taken. Unknown group names crash at boot (fail-closed). All three controls are AND-ed: a tool must pass READ_ONLY_MODE, ENABLED_TOOLS, and TOOLSETS to be registered. |
+
+**Deployment hardening note:** combine `READ_ONLY_MODE=true` (or `TOOLSETS=reporting,discovery,analytics`) with
+network-ingress restrictions (see Deploy section) to run a safe reporting-only instance that cannot
+write to Planner regardless of the bearer token's permissions. `/healthz` reports `readOnly` and
+`toolCount` so you can verify the effective surface without an MCP handshake.
 
 **Inbound token validation (`AUTH_MODE=validate`, the default):** before
 forwarding the bearer to Dataverse, the server verifies its Entra signature
@@ -269,7 +281,7 @@ In your host's remote MCP / OAuth connector settings, provide:
 Set `ENTRA_CLIENT_ID` on the container app to the same client ID so the server pins
 inbound tokens to this app and rejects anything else.
 
-Run **Test connection** — it should list the 25 tools.
+Run **Test connection** — it should list the 29 tools.
 Smoke-test with `whoami`, then the full happy path: `find_plan_by_name` /
 `create_plan` → `add_bucket` → `start_change_session` → `add_tasks` →
 `apply_changes` → poll `check_change_session_status` until `192350003`
@@ -277,7 +289,7 @@ Smoke-test with `whoami`, then the full happy path: `find_plan_by_name` /
 
 ## End-to-end acceptance test
 
-The e2e harness connects to the server **through the MCP protocol** (same path any MCP host uses), drives all 25 tools, and writes a markdown report.
+The e2e harness connects to the server **through the MCP protocol** (same path any MCP host uses), drives all 29 tools, and writes a markdown report.
 
 ```bash
 # Minimum — read-only, boots a local server automatically:
@@ -297,7 +309,7 @@ npm run e2e
 ```
 
 The harness:
-- **Phase 0 — Preflight:** confirms all 25 tools are advertised and the delegated token reaches Dataverse (`whoami`).
+- **Phase 0 — Preflight:** confirms all 29 tools are advertised and the delegated token reaches Dataverse (`whoami`).
 - **Phase 1 — Read sweep:** exercises all 8 read/reporting tools and asserts shapes and units (progressPercent 0-100 vs 0-1 fraction, truncated flags, degrade-to-warning arrays).
 - **Phase 2 — Write lifecycle** (`E2E_ALLOW_WRITES=true`): create plan → bucket → open session → `add_tasks` with a 6-level tree + FS dependency → apply → poll until 192350003 → `get_plan_tasks_and_buckets` + independent OData cross-check → second session: `update_tasks` (rename + milestone) → apply → field-level OData verify → cleanup (tasks/buckets deleted, session cancelled).
 - **Phase 3 — Guardrails:** 13 negative tests that must be *rejected* (bad bind alias, blocked-on-create fields, child-before-parent, >200 entities, delete without `confirmed`, whole-plan delete, dependency update, progress out-of-range, cycle detection, etc.).
@@ -313,7 +325,7 @@ Known gaps and planned improvements. Contributions welcome.
 
 ### Read tools
 
-- **`list_plan_tasks` — extended optional fields.** `remainingEffortHours`, `durationHours`, `actualStart`, `actualFinish` are absent from the list response. They exist only on Project Operations tenants (not basic Planner Premium) and require a try-with-fallback pattern on a paged collection query (the single-entity `get_task` already does this). Implement the same graceful degrade for `list_plan_tasks`.
+- ~~**`list_plan_tasks` — extended optional fields.**~~ *Done.* `remainingEffortHours`, `durationHours`, `actualStart`, `actualFinish` are now returned when the tenant exposes them (Project Operations). The same try-with-fallback pattern as `get_task` is used, gated by the schema capability cache so the fallback round-trip is paid at most once per process lifetime.
 
 - ~~**`list_dependencies` — environment availability.**~~ *Resolved.* The earlier 404 was a wrong entity-set name: the read tools queried `msdyn_projecttaskdependency` (singular) and `msdyn_linklagduration`, neither of which exists. Fixed to the plural set `msdyn_projecttaskdependencies` and the real lag column `msdyn_projecttaskdependencylinklag` (in `list_dependencies` and `get_task`). The 404 graceful-degrade path is kept for genuinely unsupported tenants.
 
@@ -321,13 +333,13 @@ Known gaps and planned improvements. Contributions welcome.
 
 ### Write tools
 
-- **`delete_tasks_batch` — dependency entities must be deleted separately.** PSS rejects deletion of a task that still has a `msdyn_projecttaskdependency` entity referencing it (`E_INVALIDENTITYUID`). `add_tasks` now returns `dependencyIds` so callers can pass the dependency GUIDs in the `records` field of `delete_tasks_batch` before the task IDs. However, this is a caller-burden: if `dependencyIds` are lost or the caller forgets them, cleanup fails. Investigate whether PSS can auto-cascade dependency deletion when a task is deleted, or add an auto-fetch of dependency entities to `delete_tasks_batch` when `projectId` is provided (similar to the hierarchy fetch for leaves-first sorting) so the caller never has to track dependency IDs manually.
+- ~~**`delete_tasks_batch` — dependency entities must be deleted separately.**~~ *Done.* When `projectId` is supplied, `delete_tasks_batch` now auto-fetches all `msdyn_projecttaskdependency` rows referencing the to-be-deleted tasks and prepends those deletes automatically. Callers no longer need to track dependency GUIDs. Auto-fetched dependencies count toward the 200-entity cap. If the dependency fetch fails (e.g. unsupported tenant), the tool degrades gracefully and falls back to the caller-supplied `records` with a warning.
 
-- **Task reparenting.** `update_tasks` does not support changing a task's parent (`msdyn_parenttask@odata.bind`). Whether PSS honours a parent change on update is unconfirmed live — needs an e2e test. If supported, add a `parent` field (ref or GUID) to `update_tasks`.
+- **Task reparenting.** `update_tasks` supports changing a task's parent (`msdyn_parenttask@odata.bind`). Pass `parent` as a task GUID (or ref) — the server emits `msdyn_parenttask@odata.bind` on update. Whether PSS honours the change live is confirmed by unit tests; e2e confirmation (verifying via independent OData) is still pending. Setting `parent: null` is not supported (PSS rejects null lookup binds) and is silently dropped with a warning.
 
-- ~~**Sprint assignment.**~~ *Done.* `add_sprint` creates a sprint; `add_tasks` accepts `sprint` (name or sprintId) and sets the task's `msdyn_projectsprint` lookup.
+- ~~**Sprint assignment.**~~ *Done.* `add_sprint` creates a sprint; `add_tasks` accepts `sprint` (name or sprintId) and sets the task's `msdyn_projectsprint` lookup. `update_tasks` also accepts `sprint` to move an existing task into a sprint.
 
-- ~~**Resource assignments.**~~ *Done.* `add_tasks` accepts `assignees` (project-team member name or teamMemberId, resolved against `msdyn_projectteam`) and creates `msdyn_resourceassignment` rows. `start`/`finish` are blocked on create (PSS derives them from the task).
+- ~~**Resource assignments.**~~ *Done.* `add_tasks` accepts `assignees` (project-team member name or teamMemberId, resolved against `msdyn_projectteam`) and creates `msdyn_resourceassignment` rows. The new `assign_task` tool assigns or unassigns members on an existing task without re-creating it. `start`/`finish` are blocked on create (PSS derives them from the task).
 
 - **Checklists** are supported via `add_tasks` `checklist`. **Labels**: `add_tasks` `labels` *assigns* existing plan labels, but label **creation** is UI-only — `msdyn_projectlabel` rejects both direct OData create ("edit through the Project UI") and PSS create. Unknown labels are skipped with a warning.
 
@@ -337,9 +349,9 @@ Known gaps and planned improvements. Contributions welcome.
 
 ### Infrastructure
 
-- **`DATAVERSE_LINK_TYPE_STYLE` auto-detection.** Currently a required env var. A better UX would be to probe `describe_option_set` at startup, detect which range the tenant uses, and set the style automatically — removing the manual configuration step.
+- **`DATAVERSE_LINK_TYPE_STYLE` auto-detection.** Currently a required env var. A better UX would be to probe `describe_option_set` at startup (or lazily on first write) to detect the correct range for the tenant, removing the manual configuration step. Planned but not yet implemented.
 
-- **Schema capability cache.** `get_task` probes for extended fields (`msdyn_remainingeffort`, `msdyn_duration`, `msdyn_actualstart`, `msdyn_actualfinish`) on every call, wasting a round-trip on the retry when the tenant lacks them. Cache the result at server startup so subsequent calls skip the extended `$select` immediately on tenants that don't support it.
+- ~~**Schema capability cache.**~~ *Done.* The extended-field probe result (`msdyn_remainingeffort`, `msdyn_duration`, `msdyn_actualstart`, `msdyn_actualfinish`) is now cached in `src/tools/capabilities.ts` for the process lifetime. `get_task`, `list_plan_tasks`, and `get_resource_workload` all consult the cache before issuing requests, so the fallback round-trip is paid at most once per process on tenants that lack those fields.
 
 ## Security
 

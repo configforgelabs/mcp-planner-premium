@@ -3,6 +3,7 @@ import {
   buildDeleteEntities,
   validateDeleteRecords,
   sortTaskIdsLeavesFirst,
+  selectDependenciesToDelete,
 } from "../src/tools/deleteTasks.js";
 
 const GUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -137,5 +138,140 @@ describe("validateDeleteRecords", () => {
     expect(() =>
       validateDeleteRecords([{ entityLogicalName: "msdyn_projecttask", recordId: GUID }]),
     ).not.toThrow();
+  });
+});
+
+// ---- Feature 4: selectDependenciesToDelete ----
+
+// Use a simpler, explicit dependency graph for F4 cascade tests:
+// TASK_X --[DEP_XY]--> TASK_Y   (X is predecessor, Y is successor)
+// TASK_Y --[DEP_YZ]--> TASK_Z   (Y is predecessor, Z is successor)
+// TASK_X --[DEP_XZ]--> TASK_Z   (X is predecessor, Z is successor)
+const TASK_X = "taskxxxx-1111-0000-0000-000000000001";
+const TASK_Y = "taskyyyy-2222-0000-0000-000000000002";
+const TASK_Z = "taskzzzz-3333-0000-0000-000000000003";
+const DEP_XY = "dep00000-0000-0000-0000-000000000001"; // X -> Y
+const DEP_YZ = "dep00000-0000-0000-0000-000000000002"; // Y -> Z
+const DEP_XZ = "dep00000-0000-0000-0000-000000000003"; // X -> Z
+// DEP_LONE references two tasks that will never be in the delete set
+const TASK_LONE_A = "loneaaaa-0000-0000-0000-000000000010";
+const TASK_LONE_B = "lonebbbbb-0000-0000-0000-000000000011";
+const DEP_LONE = "dep00000-0000-0000-0000-000000000004"; // LONE_A -> LONE_B
+
+const depRows = [
+  {
+    msdyn_projecttaskdependencyid: DEP_XY,
+    _msdyn_predecessortask_value: TASK_X,
+    _msdyn_successortask_value: TASK_Y,
+  },
+  {
+    msdyn_projecttaskdependencyid: DEP_YZ,
+    _msdyn_predecessortask_value: TASK_Y,
+    _msdyn_successortask_value: TASK_Z,
+  },
+  {
+    msdyn_projecttaskdependencyid: DEP_XZ,
+    _msdyn_predecessortask_value: TASK_X,
+    _msdyn_successortask_value: TASK_Z,
+  },
+  {
+    msdyn_projecttaskdependencyid: DEP_LONE,
+    _msdyn_predecessortask_value: TASK_LONE_A,
+    _msdyn_successortask_value: TASK_LONE_B,
+  },
+];
+
+describe("selectDependenciesToDelete (F4 cascade)", () => {
+  it("selects a dependency whose successor is in the delete set", () => {
+    // Delete only TASK_Y. DEP_XY has TASK_Y as successor.
+    // DEP_YZ has TASK_Y as predecessor, so it is also selected.
+    // Only DEP_XY tests the "successor" path specifically; we verify it is included.
+    const deleteSet = new Set([TASK_Y.toLowerCase()]);
+    const result = selectDependenciesToDelete(deleteSet, depRows);
+    const ids = result.map((r) => r.recordId);
+    expect(ids).toContain(DEP_XY); // TASK_Y is the successor in DEP_XY
+    expect(ids).toContain(DEP_YZ); // TASK_Y is the predecessor in DEP_YZ
+    expect(ids).not.toContain(DEP_XZ);  // neither endpoint is TASK_Y
+    expect(ids).not.toContain(DEP_LONE);
+    for (const r of result) {
+      expect(r.entityLogicalName).toBe("msdyn_projecttaskdependency");
+    }
+  });
+
+  it("selects a dependency whose predecessor is in the delete set (but not its successor)", () => {
+    // Delete only TASK_X. DEP_XY and DEP_XZ have TASK_X as predecessor.
+    const deleteSet = new Set([TASK_X.toLowerCase()]);
+    const result = selectDependenciesToDelete(deleteSet, depRows);
+    const ids = result.map((r) => r.recordId);
+    expect(ids).toContain(DEP_XY);
+    expect(ids).toContain(DEP_XZ);
+    expect(ids).not.toContain(DEP_YZ);  // TASK_X is not an endpoint of DEP_YZ
+    expect(ids).not.toContain(DEP_LONE);
+    expect(result).toHaveLength(2);
+  });
+
+  it("ignores a dependency referencing only tasks NOT being deleted", () => {
+    // Delete a task that has no deps referencing it.
+    const deleteSet = new Set(["ffffffff-0000-0000-0000-000000000099"]); // no such dep
+    const result = selectDependenciesToDelete(deleteSet, depRows);
+    expect(result).toHaveLength(0);
+  });
+
+  it("returns an empty array when depRows is empty", () => {
+    const deleteSet = new Set([TASK_X.toLowerCase()]);
+    expect(selectDependenciesToDelete(deleteSet, [])).toHaveLength(0);
+  });
+
+  it("de-dupes a dependency id already present in caller records", () => {
+    // Delete TASK_X → DEP_XY and DEP_XZ would be selected.
+    // Caller already queued DEP_XY — only DEP_XZ should be returned.
+    const deleteSet = new Set([TASK_X.toLowerCase()]);
+    const callerIds = new Set([DEP_XY.toLowerCase()]);
+    const result = selectDependenciesToDelete(deleteSet, depRows, callerIds);
+    const ids = result.map((r) => r.recordId);
+    expect(ids).not.toContain(DEP_XY); // de-duped
+    expect(ids).toContain(DEP_XZ);
+    expect(result).toHaveLength(1);
+  });
+
+  it("integration with ordering: dependency entities precede task entities in buildDeleteEntities output", () => {
+    // Delete only TASK_Z — only DEP_YZ and DEP_XZ reference TASK_Z (as successor).
+    // DEP_LONE is unrelated, DEP_XY is unrelated.
+    const deleteSet = new Set([TASK_Z.toLowerCase()]);
+    const cascadedDeps = selectDependenciesToDelete(deleteSet, depRows);
+    // Combine: cascaded deps first, then the task itself.
+    const records = [
+      ...cascadedDeps,
+      { entityLogicalName: "msdyn_projecttask" as const, recordId: TASK_Z },
+    ];
+    expect(() => validateDeleteRecords(records)).not.toThrow();
+    const entities = buildDeleteEntities(records);
+    // First two entities must be dependency entities (DEP_YZ, DEP_XZ), last is the task.
+    for (let i = 0; i < cascadedDeps.length; i++) {
+      expect(entities[i]["@odata.type"]).toBe("Microsoft.Dynamics.CRM.msdyn_projecttaskdependency");
+    }
+    expect(entities[entities.length - 1]["@odata.type"]).toBe(
+      "Microsoft.Dynamics.CRM.msdyn_projecttask",
+    );
+  });
+
+  it("tasks + auto-deps exceeding 200 triggers the validateDeleteRecords cap", () => {
+    // Create 201 task records — should hit the cap via validateDeleteRecords
+    const records = Array.from({ length: 201 }, (_, i) => ({
+      entityLogicalName: "msdyn_projecttask" as const,
+      recordId: String(i).padStart(8, "0") + "-0000-0000-0000-000000000000",
+    }));
+    expect(() => validateDeleteRecords(records)).toThrow(/200/);
+  });
+
+  it("confirmed gate (handler) and whole-plan-delete block (validateDeleteRecords) are intact", () => {
+    // confirmed gate is at the handler level (not validateDeleteRecords), so we verify
+    // the allow-list / whole-plan guardrails remain unchanged after adding cascade logic.
+    expect(() =>
+      validateDeleteRecords([{ entityLogicalName: "msdyn_project", recordId: GUID }]),
+    ).toThrow(/blocked by policy/); // whole-plan block intact
+    expect(() =>
+      validateDeleteRecords([{ entityLogicalName: "msdyn_projecttask", recordId: GUID }]),
+    ).not.toThrow(); // valid task passes
   });
 });

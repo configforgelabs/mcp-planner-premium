@@ -2,6 +2,12 @@ import { z } from "zod";
 import { getApiBase } from "../config.js";
 import { dvReq, dvHeaders, dvErrorMessage, assertGuid } from "../dataverse.js";
 import { linkTypeLabel, decodeDataverseText } from "./readHelpers.js";
+import {
+  getExtendedTaskFieldsCapability,
+  setExtendedTaskFieldsCapability,
+  isMissingPropertyError,
+  EXTENDED_TASK_FIELDS,
+} from "./capabilities.js";
 import type { ToolDef } from "./types.js";
 
 // One task in full, including its dependency links and resource assignments.
@@ -28,33 +34,22 @@ export const getTask: ToolDef = {
       "msdyn_outlinelevel,msdyn_displaysequence,msdyn_ismilestone,msdyn_priority," +
       "_msdyn_projectbucket_value,_msdyn_parenttask_value,_msdyn_projectsprint_value";
     // Fields that exist only on Project Operations / certain tenant versions.
-    // Gracefully absent on basic Planner Premium tenants.
-    const EXTENDED_FIELDS = "msdyn_remainingeffort,msdyn_duration,msdyn_actualstart,msdyn_actualfinish";
+    // Gracefully absent on basic Planner Premium tenants. Shared literal from
+    // capabilities.ts so the probe URL and cache stay in sync with list_plan_tasks.
     const EXPAND =
       "&$expand=msdyn_projectbucket($select=msdyn_name),msdyn_parenttask($select=msdyn_subject)";
 
-    // Try with extended fields first; on any "Could not find a property" 400,
-    // drop all extended fields and retry with core only. One retry covers any
-    // combination of missing fields without needing per-field probes.
-    let hasExtended = true;
-    let taskRes = await dvReq(
-      {
-        url:
-          BASE +
-          "/msdyn_projecttasks(" +
-          taskId +
-          ")?$select=" +
-          CORE_SELECT +
-          "," +
-          EXTENDED_FIELDS +
-          EXPAND,
-        method: "GET",
-        headers: dvHeaders(),
-      },
-      { retry: true },
-    );
-    if (taskRes.status === 400 && /could not find a property named/i.test(dvErrorMessage(taskRes))) {
-      hasExtended = false;
+    // Check the process-lifetime capability cache first.
+    // "unknown" → do the existing try-then-fallback (same behaviour as before,
+    //   but the outcome is recorded so subsequent calls skip the probe).
+    // "present" → skip to the extended select immediately.
+    // "absent"  → skip to core-only select immediately (saves the wasted 400).
+    const cap = getExtendedTaskFieldsCapability();
+    let hasExtended = cap !== "absent";
+    let taskRes;
+
+    if (cap === "absent") {
+      // Capability already known absent — go straight to core select.
       taskRes = await dvReq(
         {
           url: BASE + "/msdyn_projecttasks(" + taskId + ")?$select=" + CORE_SELECT + EXPAND,
@@ -63,6 +58,41 @@ export const getTask: ToolDef = {
         },
         { retry: true },
       );
+    } else {
+      // "present" or "unknown": try with extended fields first.
+      taskRes = await dvReq(
+        {
+          url:
+            BASE +
+            "/msdyn_projecttasks(" +
+            taskId +
+            ")?$select=" +
+            CORE_SELECT +
+            "," +
+            EXTENDED_TASK_FIELDS +
+            EXPAND,
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      if (isMissingPropertyError(taskRes.status, dvErrorMessage(taskRes))) {
+        // Extended fields absent on this tenant — record in the cache so
+        // future calls (in this process) skip the probe entirely.
+        setExtendedTaskFieldsCapability("absent");
+        hasExtended = false;
+        taskRes = await dvReq(
+          {
+            url: BASE + "/msdyn_projecttasks(" + taskId + ")?$select=" + CORE_SELECT + EXPAND,
+            method: "GET",
+            headers: dvHeaders(),
+          },
+          { retry: true },
+        );
+      } else if (taskRes.status < 400 && cap === "unknown") {
+        // First successful extended read — record as present.
+        setExtendedTaskFieldsCapability("present");
+      }
     }
     if (taskRes.status >= 400)
       throw new Error("get_task failed (" + taskRes.status + "): " + dvErrorMessage(taskRes));

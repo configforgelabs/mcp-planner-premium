@@ -1,6 +1,38 @@
 import { z } from "zod";
 
 /**
+ * Coerces common string representations of booleans to a JS boolean.
+ * Accepts (case-insensitive): true/1/yes/on → true; false/0/no/off/"" → false.
+ * Throws a Zod issue for any other value (fail-fast).
+ *
+ * Used as a .transform() callback; the input type is the output of the preceding
+ * z.union([z.boolean(), z.string(), z.undefined()]).optional().default(false),
+ * which is boolean | string (after .default() removes undefined from the domain).
+ */
+function coerceBool(
+  value: boolean | string,
+  ctx: z.RefinementCtx,
+): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const lower = value.toLowerCase().trim();
+    if (lower === "" || lower === "false" || lower === "0" || lower === "no" || lower === "off") {
+      return false;
+    }
+    if (lower === "true" || lower === "1" || lower === "yes" || lower === "on") {
+      return true;
+    }
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Invalid boolean value "${value}". Expected true/false/1/0/yes/no/on/off.`,
+    });
+    return z.NEVER;
+  }
+  // Fallback (should be unreachable given the union above)
+  return false;
+}
+
+/**
  * Environment configuration, validated ONCE with a zod schema. Validation is
  * lazy + cached (getEnv) so importing a tool module for unit testing does not
  * require the full runtime env, but the HTTP entrypoint calls getEnv() at boot
@@ -51,6 +83,24 @@ const EnvSchema = z
     REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
     RATE_LIMIT_PER_MIN: z.coerce.number().int().positive().default(120),
     JSON_BODY_LIMIT: z.string().default("2mb"),
+
+    // --- Production-ops tool filtering ---
+
+    // When true, the server exposes ONLY read-only tools (readOnlyHint===true) and
+    // rejects any write/session tool call at call time. For a safe reporting-only
+    // deployment. Accepts "true"/"1"/"yes"/"on" (case-insensitive) as true.
+    READ_ONLY_MODE: z
+      .union([z.boolean(), z.string(), z.undefined()])
+      .optional()
+      .default(false)
+      .transform(coerceBool),
+
+    // Explicit allowlist of tool names (comma list). Unset = all tools eligible.
+    ENABLED_TOOLS: z.string().optional(),
+
+    // Named tool groups to expose (comma list). Unset = all groups eligible.
+    // Known groups: reporting, discovery, sessions, write, analytics.
+    TOOLSETS: z.string().optional(),
   })
   .superRefine((v, ctx) => {
     if (v.AUTH_MODE === "validate" && !v.TENANT_ID) {
@@ -125,4 +175,25 @@ export function getAllowedHosts(): string[] | undefined {
 
 export function getAllowedOrigins(): string[] | undefined {
   return splitList(getEnv().ALLOWED_ORIGINS);
+}
+
+/** Returns true when READ_ONLY_MODE is enabled. */
+export function isReadOnlyMode(): boolean {
+  return getEnv().READ_ONLY_MODE;
+}
+
+/**
+ * Returns the ENABLED_TOOLS allowlist (parsed comma list), or undefined when
+ * the env var is not set (no constraint).
+ */
+export function getEnabledTools(): string[] | undefined {
+  return splitList(getEnv().ENABLED_TOOLS);
+}
+
+/**
+ * Returns the TOOLSETS allowlist (parsed comma list), or undefined when the
+ * env var is not set (no constraint).
+ */
+export function getToolsets(): string[] | undefined {
+  return splitList(getEnv().TOOLSETS);
 }

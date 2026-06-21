@@ -188,3 +188,73 @@ describe("buildUpdateEntities", () => {
     expect(() => validateUpdateEntities(entities)).toThrow(/roll up from its children/);
   });
 });
+
+const SPRINT = "eeeeeeee-ffff-0000-1111-222222222222";
+
+describe("buildUpdateEntities — sprint field (F2)", () => {
+  it("binds a sprint via a resolved id in the map", () => {
+    const resolved = new Map([[0, SPRINT]]);
+    const { entities, warnings } = buildUpdateEntities(
+      [{ taskId: ID, sprint: "Sprint 1" }],
+      undefined,
+      resolved,
+    );
+    expect(entities).toHaveLength(1);
+    expect(entities[0]["msdyn_projectsprint@odata.bind"]).toBe(
+      "/msdyn_projectsprints(" + SPRINT + ")",
+    );
+    expect(warnings).toHaveLength(0);
+    // Must pass the update guardrails
+    expect(() => validateUpdateEntities(entities)).not.toThrow();
+  });
+
+  it("accepts a sprintId GUID directly (resolved map carries the GUID)", () => {
+    const resolved = new Map([[0, SPRINT]]);
+    const { entities } = buildUpdateEntities(
+      [{ taskId: ID, sprint: SPRINT }],
+      undefined,
+      resolved,
+    );
+    expect(entities[0]["msdyn_projectsprint@odata.bind"]).toBe(
+      "/msdyn_projectsprints(" + SPRINT + ")",
+    );
+  });
+
+  it("throws when sprint is provided but no resolved id is in the map", () => {
+    expect(() =>
+      buildUpdateEntities([{ taskId: ID, sprint: "Nonexistent Sprint" }], undefined, new Map()),
+    ).toThrow(/could not be resolved/i);
+  });
+
+  it("sprint counts as a change — sprint-only update is accepted (no 'nothing to change' throw)", () => {
+    const resolved = new Map([[0, SPRINT]]);
+    expect(() =>
+      buildUpdateEntities([{ taskId: ID, sprint: "Sprint 1" }], undefined, resolved),
+    ).not.toThrow();
+  });
+
+  it("sprint combined with effort and progress sets all three in one entity", () => {
+    const resolved = new Map([[0, SPRINT]]);
+    const { entities, warnings } = buildUpdateEntities(
+      [{ taskId: ID, sprint: "Sprint 1", effortHours: 8, progressPercent: 50 }],
+      undefined,
+      resolved,
+    );
+    expect(entities[0]["msdyn_projectsprint@odata.bind"]).toBe(
+      "/msdyn_projectsprints(" + SPRINT + ")",
+    );
+    expect(entities[0].msdyn_effort).toBe(8);
+    expect(entities[0].msdyn_progress).toBe(0.5);
+    expect(warnings).toHaveLength(0);
+  });
+
+  it("sprint=null is dropped with a warning instead of emitting a null bind", () => {
+    const { entities, warnings } = buildUpdateEntities(
+      [{ taskId: ID, subject: "Keep", sprint: null as any }],
+    );
+    expect("msdyn_projectsprint@odata.bind" in entities[0]).toBe(false);
+    expect(entities[0].msdyn_subject).toBe("Keep");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/sprint=null skipped/i);
+  });
+});

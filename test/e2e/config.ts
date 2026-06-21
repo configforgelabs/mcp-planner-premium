@@ -34,6 +34,43 @@ const EnvSchema = z.object({
   E2E_POLL_INTERVAL_S: z.coerce.number().int().positive().default(5),
   /** Port for the local server when MCP_URL is not set. */
   PORT: z.coerce.number().int().positive().default(4000),
+
+  // ── Seed harness flags (test/e2e/seedRun.ts) ────────────────────────────────
+  /**
+   * Prefer reuse/resume of the named seed plan over a fresh build.
+   * Default: true (warm path). Set to "false" to force a fresh disposable plan
+   * per run (legacy pm-acceptance behaviour).
+   */
+  REUSE_SEED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
+  /**
+   * Force a complete cold rebuild of the seed plan, deleting the stale plan
+   * out-of-band if one exists. Takes precedence over REUSE_SEED.
+   */
+  REBUILD_SEED: z
+    .enum(["true", "false", "1", "0"])
+    .default("false")
+    .transform((v) => v === "true" || v === "1"),
+  /**
+   * Name of the long-lived seed plan in Dataverse.
+   * Default: ZZ-MCP-SEED-itboard (never swept by cleanup-e2e-plans.ts).
+   */
+  SEED_PLAN_NAME: z.string().default("ZZ-MCP-SEED-itboard"),
+  /**
+   * Run only scenarios whose `feature` field matches this value.
+   * When unset all scenarios run.
+   */
+  FEATURE: z.string().optional(),
+  /**
+   * Keep the seed plan even after a fully-green run.
+   * Also honoured by pm-acceptance.ts for its disposable plan.
+   */
+  KEEP_PLAN: z
+    .enum(["true", "false", "1", "0"])
+    .default("false")
+    .transform((v) => v === "true" || v === "1"),
 });
 
 export type E2EConfig = z.infer<typeof EnvSchema>;

@@ -85,6 +85,7 @@ roadmap item in §9.
 | 5.2 Token redaction in logs | ✅ Done | pino `redact` ([`src/logger.ts`](src/logger.ts)); verified by test output. |
 | 5.3 Ingress restriction to known caller | ❌ Not done (operator action) | Recommended: restrict the Azure Container Apps ingress to the MCP host's egress IP range, or use internal ingress for a dedicated deployment. This is an Azure deployment-time control, not code. Documented in README. |
 | 5.4 No secrets committed to the repo | ✅ Done | No credentials, tenant ids or org URLs in source - only example placeholders (`contoso`, all-zero GUIDs). `.env` and build artifacts are gitignored. |
+| 5.5 Read-only and scoped-toolset deployment | ✅ Done | `READ_ONLY_MODE=true` filters the server to the 17 read-only tools at registration time and adds a call-time hard-reject for any write/session tool call — a reporting-only instance cannot write to Planner regardless of the bearer token's permissions. `ENABLED_TOOLS` and `TOOLSETS` provide an explicit allowlist and named-group allowlist respectively. All three controls are AND-ed; the classification derives from `readOnlyHint` in `src/tools/index.ts` (single source of truth). Unknown names/groups fail closed at boot — a misconfigured allowlist crashes the container rather than silently exposing nothing or everything. `/healthz` reports `readOnly` and `toolCount` for operator verification without an MCP handshake. |
 
 ---
 

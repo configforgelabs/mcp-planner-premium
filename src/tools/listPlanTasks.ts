@@ -1,7 +1,13 @@
 import { z } from "zod";
 import { getApiBase } from "../config.js";
-import { assertGuid, isGuid } from "../dataverse.js";
+import { dvReq, dvErrorMessage, assertGuid, isGuid } from "../dataverse.js";
 import { pageAll, readHeaders, nowIso, decodeDataverseText, type RawTask } from "./readHelpers.js";
+import {
+  getExtendedTaskFieldsCapability,
+  setExtendedTaskFieldsCapability,
+  isMissingPropertyError,
+  EXTENDED_TASK_FIELDS,
+} from "./capabilities.js";
 import type { ToolDef } from "./types.js";
 
 interface FullTask extends RawTask {
@@ -15,6 +21,11 @@ interface FullTask extends RawTask {
   _msdyn_projectsprint_value?: string | null;
   msdyn_projectbucket?: { msdyn_name?: string } | null;
   msdyn_parenttask?: { msdyn_subject?: string } | null;
+  // Extended fields (Project Operations-only; may be absent)
+  msdyn_remainingeffort?: number | null;
+  msdyn_duration?: number | null;
+  msdyn_actualstart?: string | null;
+  msdyn_actualfinish?: string | null;
 }
 
 // Filtered task list for a plan. One scan, filtered client-side so 'overdue'
@@ -45,21 +56,78 @@ export const listPlanTasks: ToolDef = {
     const filter = input.filter ?? "all";
     const bucketFilter = (input.bucketId || "").trim();
     if (bucketFilter && !isGuid(bucketFilter)) throw new Error("bucketId must be a GUID.");
+    const toolWarnings: string[] = [];
 
     let odata = "_msdyn_project_value eq " + projectId;
     if (bucketFilter) odata += " and _msdyn_projectbucket_value eq " + bucketFilter;
 
-    const url =
-      BASE +
-      "/msdyn_projecttasks?$select=msdyn_projecttaskid,msdyn_subject,msdyn_description," +
+    const CORE_SELECT =
+      "msdyn_projecttaskid,msdyn_subject,msdyn_description," +
       "msdyn_start,msdyn_finish,msdyn_progress,msdyn_effort,msdyn_outlinelevel," +
       "msdyn_ismilestone,msdyn_priority,msdyn_displaysequence," +
-      "_msdyn_projectbucket_value,_msdyn_parenttask_value,_msdyn_projectsprint_value" +
-      "&$expand=msdyn_projectbucket($select=msdyn_name),msdyn_parenttask($select=msdyn_subject)" +
-      "&$filter=" +
-      odata +
-      "&$orderby=msdyn_displaysequence asc";
-    const paged = await pageAll(url, readHeaders());
+      "_msdyn_projectbucket_value,_msdyn_parenttask_value,_msdyn_projectsprint_value";
+    const EXPAND =
+      "&$expand=msdyn_projectbucket($select=msdyn_name),msdyn_parenttask($select=msdyn_subject)";
+    const filterAndOrder = "&$filter=" + odata + "&$orderby=msdyn_displaysequence asc";
+
+    // Check the process-lifetime capability cache for extended fields.
+    const cap = getExtendedTaskFieldsCapability();
+    let hasExtended = cap !== "absent";
+    let paged;
+
+    if (cap === "absent") {
+      // Known absent — go straight to core select.
+      paged = await pageAll(
+        BASE + "/msdyn_projecttasks?$select=" + CORE_SELECT + EXPAND + filterAndOrder,
+        readHeaders(),
+      );
+    } else if (cap === "present") {
+      // Known present — use extended select.
+      paged = await pageAll(
+        BASE +
+          "/msdyn_projecttasks?$select=" +
+          CORE_SELECT +
+          "," +
+          EXTENDED_TASK_FIELDS +
+          EXPAND +
+          filterAndOrder,
+        readHeaders(),
+      );
+    } else {
+      // Unknown — probe with a single first-page request including extended fields.
+      const extUrl =
+        BASE +
+        "/msdyn_projecttasks?$select=" +
+        CORE_SELECT +
+        "," +
+        EXTENDED_TASK_FIELDS +
+        EXPAND +
+        filterAndOrder;
+      const probeRes = await dvReq({ url: extUrl, method: "GET", headers: readHeaders() }, { retry: true });
+
+      if (isMissingPropertyError(probeRes.status, dvErrorMessage(probeRes))) {
+        // Extended fields absent on this tenant — cache and retry with core only.
+        setExtendedTaskFieldsCapability("absent");
+        hasExtended = false;
+        toolWarnings.push(
+          "Extended scheduling fields (remaining effort, duration, actuals) are not available on this environment.",
+        );
+        paged = await pageAll(
+          BASE + "/msdyn_projecttasks?$select=" + CORE_SELECT + EXPAND + filterAndOrder,
+          readHeaders(),
+        );
+      } else if (probeRes.status >= 400) {
+        throw new Error(
+          "list_plan_tasks failed (" + probeRes.status + "): " + dvErrorMessage(probeRes),
+        );
+      } else {
+        // Extended fields available — record and collect all pages.
+        setExtendedTaskFieldsCapability("present");
+        hasExtended = true;
+        paged = await pageAll(extUrl, readHeaders());
+      }
+    }
+
     const rows = paged.rows as FullTask[];
 
     // Summary set for the overdue exclusion.
@@ -103,6 +171,13 @@ export const listPlanTasks: ToolDef = {
       parentTaskId: t._msdyn_parenttask_value ?? null,
       parentTaskSubject: t.msdyn_parenttask?.msdyn_subject ?? null,
       sprintId: t._msdyn_projectsprint_value ?? null,
+      // Extended fields (Project Operations-only; absent on basic tenants)
+      ...(hasExtended && {
+        remainingEffortHours: t.msdyn_remainingeffort ?? null,
+        durationHours: t.msdyn_duration ?? null,
+        actualStart: t.msdyn_actualstart ?? null,
+        actualFinish: t.msdyn_actualfinish ?? null,
+      }),
     }));
 
     return {
@@ -111,6 +186,7 @@ export const listPlanTasks: ToolDef = {
       filter,
       count: tasks.length,
       truncated: paged.truncated,
+      warnings: toolWarnings,
       tasks,
     };
   },

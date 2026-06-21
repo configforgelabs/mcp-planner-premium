@@ -11,7 +11,12 @@ import {
   getAudiences,
   getAllowedHosts,
   getAllowedOrigins,
+  isReadOnlyMode,
+  getEnabledTools,
+  getToolsets,
 } from "./config.js";
+import { filterTools } from "./toolFilter.js";
+import { allTools, toolAnnotations } from "./tools/index.js";
 import { logger } from "./logger.js";
 import { verifyAccessToken, TokenValidationError } from "./auth.js";
 import { errMessage } from "./dataverse.js";
@@ -45,6 +50,17 @@ function send401(res: Response, error: string, description: string): void {
 export function buildApp(): Express {
   const env = getEnv();
 
+  // Fail-closed boot validation: validate ENABLED_TOOLS and TOOLSETS values at
+  // startup so a misconfiguration crashes the container immediately (the same
+  // posture as the existing Zod env schema). filterTools throws for any unknown
+  // tool name or unknown toolset group; we discard the result here — its only
+  // purpose is to surface the error at boot rather than per-request.
+  const bootFilter = filterTools(allTools, toolAnnotations, {
+    readOnly: isReadOnlyMode(),
+    enabledTools: getEnabledTools(),
+    toolsets: getToolsets(),
+  });
+
   const app = express();
   app.disable("x-powered-by");
   app.use(helmet());
@@ -62,12 +78,18 @@ export function buildApp(): Express {
   app.use(express.json({ limit: env.JSON_BODY_LIMIT }));
 
   // Liveness/readiness probe. 503 while draining so ACA stops routing here.
+  // Includes operator-visible metadata: readOnly flag and exposed tool count.
   app.get("/healthz", (_req: Request, res: Response) => {
     if (state.shuttingDown) {
       res.status(503).json({ ok: false, status: "shutting_down" });
       return;
     }
-    res.json({ ok: true, service: "mcp-planner-premium" });
+    res.json({
+      ok: true,
+      service: "mcp-planner-premium",
+      readOnly: isReadOnlyMode(),
+      toolCount: bootFilter.tools.length,
+    });
   });
 
   const mcpLimiter = rateLimit({

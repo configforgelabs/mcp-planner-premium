@@ -47,6 +47,22 @@ is that those guardrails hold. See `SECURITY.md` and `QUALITY-ASSURANCE.md`.
 
 Quick gate any time: run `/verify` (typecheck + tests).
 
+## Adding a PSS feature (read this before touching a new entity/field/bind)
+
+This server talks only to Dataverse/PSS, where **guessing a field name, an
+`@odata.bind` casing, the plural entity-set name, or what is even API-creatable
+wastes hours**. Two rules:
+
+1. **Discover before you code.** Probe the live schema and prove a minimal create
+   live FIRST. `docs/PSS-IMPLEMENTATION-LESSONS.md` is the field guide — the
+   actual traps (root-task auto-nesting, per-entity bind casing, blocked-on-create
+   fields, 200-per-operation-set, EU link-type values, labels/milestone/comments
+   being non-creatable, identity-by-resource-id) and verified payload recipes.
+2. **Use the workflow.** Run `/add-pss-feature <capability>`, which drives the
+   `pss-schema-scout` subagent (Opus — discovers + proves the schema) then
+   `pss-feature-implementer` (Sonnet — implements per the proven spec + tests),
+   then `guardrail-auditor`. Don't implement from a guessed schema.
+
 ## Where things live
 
 ```

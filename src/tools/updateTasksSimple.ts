@@ -23,6 +23,11 @@ export interface SimpleTaskUpdate {
   /** Reparent (move under another task): an EXISTING task GUID. update has no
    * in-batch refs, so a name or ref is not accepted here. */
   parent?: string;
+  /** Move this task into a sprint: sprint NAME (resolved against the plan) or a
+   * sprintId GUID. Requires projectId at the top level for name resolution.
+   * Removing a task from a sprint (null sprint) is not supported — PSS rejects
+   * null lookup binds; pass null to get a warning and no change. */
+  sprint?: string;
 }
 
 export interface BuiltUpdate {
@@ -47,6 +52,7 @@ export interface BuiltUpdate {
 export function buildUpdateEntities(
   tasks: SimpleTaskUpdate[],
   resolvedBucketIds?: Map<number, string>,
+  resolvedSprintIds?: Map<number, string>,
 ): BuiltUpdate {
   if (!Array.isArray(tasks) || tasks.length === 0)
     throw new Error("tasks must be a non-empty array.");
@@ -161,6 +167,30 @@ export function buildUpdateEntities(
         changed++;
       }
     }
+    if (t.sprint !== undefined) {
+      if (t.sprint === null) {
+        // PSS rejects null lookup binds — drop with a warning, matching parent=null behaviour.
+        warnings.push(
+          "tasks[" +
+            i +
+            "] (" +
+            id +
+            "): sprint=null skipped — removing a task from a sprint (un-sprinting) is not supported via the API (PSS rejects null lookup binds). Omit the field instead.",
+        );
+      } else {
+        const sprintId = resolvedSprintIds?.get(i);
+        if (!sprintId)
+          throw new Error(
+            "tasks[" +
+              i +
+              "]: sprint '" +
+              t.sprint +
+              "' could not be resolved — pass projectId to enable sprint-name resolution, or pass a sprintId GUID directly. Create the sprint first with add_sprint if it does not exist yet.",
+          );
+        ent["msdyn_projectsprint@odata.bind"] = "/msdyn_projectsprints(" + sprintId + ")";
+        changed++;
+      }
+    }
     if (changed === 0)
       throw new Error(
         "tasks[" +
@@ -207,6 +237,12 @@ const updateSchema = z.object({
     .describe(
       "Reparent the task: move it under another EXISTING task by its GUID (msdyn_projecttaskid). Unlike add_tasks, no in-batch refs or names — pass a persisted task GUID. Moving a task to the top level (un-parenting) is NOT supported and is ignored with a warning. Invalid moves (e.g. a cycle) are rejected by the scheduling engine on apply.",
     ),
+  sprint: z
+    .string()
+    .optional()
+    .describe(
+      "Move the task into a sprint: sprint NAME (resolved against the plan) or a sprintId GUID. Requires projectId at the top level for name resolution; pass a sprintId GUID to skip the lookup. Create the sprint first with add_sprint. Removing a task from a sprint (sprint=null) is NOT supported and is ignored with a warning.",
+    ),
 });
 
 // Ergonomic update - the model sends a plain list keyed by taskId; the server
@@ -215,7 +251,7 @@ export const updateTasksSimple: ToolDef = {
   name: "update_tasks",
   title: "Update Tasks in Plan",
   description:
-    "Updates existing tasks from a SIMPLE list - you pass taskId plus only the fields to change (subject, description, start, finish, effortHours, progressPercent 0-100, priority, bucket, parent); the server builds the Dataverse payload. Move a task to another bucket with 'bucket', or reparent it under another existing task with 'parent' (an existing task GUID). Pass projectId to enable two automatic behaviours: (1) bucket names are resolved to IDs, and (2) the plan's task hierarchy is fetched so summary (parent) tasks are protected automatically — you do NOT need a separate get_plan_tasks_and_buckets call when projectId is provided. Without projectId the summary-task guard only fires if you pass explicit summaryTaskIds. Dependencies cannot be updated (delete and recreate). The milestone flag CANNOT be set via this API - passing milestone returns a warning and is ignored. Un-parenting (moving a task to the top level) is not supported and is ignored with a warning. Get explicit user approval before queuing schedule changes. Saved only after 'Apply Changes to Plan'. For raw OData field control use the advanced update_tasks_batch.",
+    "Updates existing tasks from a SIMPLE list - you pass taskId plus only the fields to change (subject, description, start, finish, effortHours, progressPercent 0-100, priority, bucket, sprint, parent); the server builds the Dataverse payload. Move a task to another bucket with 'bucket', place a task in a sprint with 'sprint' (sprint name resolved against the plan — requires projectId, or pass a sprintId GUID directly), or reparent it under another existing task with 'parent' (an existing task GUID). Pass projectId to enable three automatic behaviours: (1) bucket names are resolved to IDs, (2) sprint names are resolved to IDs, and (3) the plan's task hierarchy is fetched so summary (parent) tasks are protected automatically — you do NOT need a separate get_plan_tasks_and_buckets call when projectId is provided. Without projectId the summary-task guard only fires if you pass explicit summaryTaskIds. Dependencies cannot be updated (delete and recreate). The milestone flag CANNOT be set via this API - passing milestone returns a warning and is ignored. Un-parenting (moving a task to the top level) is not supported and is ignored with a warning. Removing a task from a sprint (sprint=null) is not supported. Get explicit user approval before queuing schedule changes. Saved only after 'Apply Changes to Plan'. For raw OData field control use the advanced update_tasks_batch.",
   inputSchema: {
     operationSetId: z
       .string()
@@ -302,7 +338,60 @@ export const updateTasksSimple: ToolDef = {
       });
     }
 
-    const { entities, warnings } = buildUpdateEntities(tasks, resolvedBucketIds);
+    // Resolve sprint names -> sprintIds with a single read (mirrors addTasksSimple.ts:540-582).
+    const resolvedSprintIds = new Map<number, string>();
+    const wantedSprintNames = new Set<string>();
+    for (const t of tasks) {
+      const s = (t.sprint || "").trim();
+      if (s && s !== "null" && !isGuid(s)) wantedSprintNames.add(s.toLowerCase());
+    }
+    if (wantedSprintNames.size > 0) {
+      const projectId = assertGuid(String(input.projectId || ""), "projectId");
+      const res = await dvReq(
+        {
+          url:
+            BASE +
+            "/msdyn_projectsprints?$select=msdyn_projectsprintid,msdyn_name&$filter=_msdyn_project_value eq " +
+            projectId +
+            "&$top=200",
+          method: "GET",
+          headers: dvHeaders(),
+        },
+        { retry: true },
+      );
+      if (res.status >= 400)
+        throw new Error("sprint lookup failed (" + res.status + "): " + dvErrorMessage(res));
+      const sprintNameToId: Record<string, string> = {};
+      const counts: Record<string, number> = {};
+      for (const s of res.json?.value || []) {
+        const key = String(s.msdyn_name || "").trim().toLowerCase();
+        counts[key] = (counts[key] || 0) + 1;
+        sprintNameToId[key] = s.msdyn_projectsprintid;
+      }
+      for (const name of wantedSprintNames) {
+        if (!sprintNameToId[name])
+          throw new Error(
+            "No sprint named '" + name + "' in this plan. Create it first with add_sprint, or pass a sprintId GUID.",
+          );
+        if (counts[name] > 1)
+          throw new Error(
+            "Multiple sprints named '" + name + "' — pass the sprintId GUID instead of the name.",
+          );
+      }
+      tasks.forEach((t, i) => {
+        const s = (t.sprint || "").trim();
+        if (!s || s === "null") return;
+        resolvedSprintIds.set(i, isGuid(s) ? s : sprintNameToId[s.toLowerCase()]);
+      });
+    } else {
+      // Handle tasks that pass a sprintId GUID directly (no name lookup needed).
+      tasks.forEach((t, i) => {
+        const s = (t.sprint || "").trim();
+        if (s && s !== "null" && isGuid(s)) resolvedSprintIds.set(i, s);
+      });
+    }
+
+    const { entities, warnings } = buildUpdateEntities(tasks, resolvedBucketIds, resolvedSprintIds);
 
     // Auto-detect summary tasks from the plan hierarchy when projectId is provided.
     // This lets the guard fire without requiring a prior get_plan_tasks_and_buckets

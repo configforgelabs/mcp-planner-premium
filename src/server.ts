@@ -1,5 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { allTools, toolAnnotations } from "./tools/index.js";
+import { filterTools } from "./toolFilter.js";
+import { isReadOnlyMode, getEnabledTools, getToolsets } from "./config.js";
 
 /**
  * Server-level guidance, returned to every MCP host on `initialize`. This is the
@@ -48,7 +50,16 @@ export function buildServer(): McpServer {
     },
   );
 
-  for (const tool of allTools) {
+  // Determine the active tool surface. filterTools is pure and cheap (~25
+  // iterations); it runs per request because buildServer() is called per
+  // request in the stateless HTTP transport.
+  const { tools, readOnlyNames } = filterTools(allTools, toolAnnotations, {
+    readOnly: isReadOnlyMode(),
+    enabledTools: getEnabledTools(),
+    toolsets: getToolsets(),
+  });
+
+  for (const tool of tools) {
     server.registerTool(
       tool.name,
       {
@@ -58,6 +69,16 @@ export function buildServer(): McpServer {
         annotations: toolAnnotations[tool.name],
       },
       async (args: unknown) => {
+        // Defense-in-depth: even if a write/session tool were somehow invoked
+        // (e.g. a stale client replaying a direct JSON-RPC call), reject it
+        // here before any Dataverse call is made. The registration filter above
+        // is the primary gate; this is the secondary layer.
+        if (isReadOnlyMode() && !readOnlyNames.has(tool.name)) {
+          throw new Error(
+            `This server is running in read-only mode; '${tool.name}' is a write/session tool and is disabled.`,
+          );
+        }
+
         const result = await tool.handler(args as any);
         const out: {
           content: { type: "text"; text: string }[];

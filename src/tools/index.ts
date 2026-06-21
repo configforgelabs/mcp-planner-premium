@@ -9,6 +9,7 @@ import { addTasks } from "./addTasks.js";
 import { updateTasksSimple } from "./updateTasksSimple.js";
 import { updateTasks } from "./updateTasks.js";
 import { deleteTasks } from "./deleteTasks.js";
+import { assignTask } from "./assignTask.js";
 import { applyChanges } from "./applyChanges.js";
 import { checkStatus } from "./checkStatus.js";
 import { cancelSession } from "./cancelSession.js";
@@ -25,6 +26,9 @@ import { getBucketBreakdown } from "./getBucketBreakdown.js";
 import { listDependencies } from "./listDependencies.js";
 import { listTeamMembers } from "./listTeamMembers.js";
 import { describeOptionSet } from "./describeOptionSet.js";
+import { getCriticalPath } from "./getCriticalPath.js";
+import { getScheduleHealth } from "./getScheduleHealth.js";
+import { getResourceWorkload } from "./getResourceWorkload.js";
 
 /**
  * All tools, in the natural workflow order. The 12 ports of the Langdock
@@ -41,6 +45,7 @@ export const allTools: ToolDef[] = [
   updateTasksSimple,
   updateTasks,
   deleteTasks,
+  assignTask,
   applyChanges,
   checkStatus,
   cancelSession,
@@ -59,6 +64,10 @@ export const allTools: ToolDef[] = [
   listDependencies,
   listTeamMembers,
   describeOptionSet,
+  // Analytics tools (schedule & resource insights)
+  getCriticalPath,
+  getScheduleHealth,
+  getResourceWorkload,
 ];
 
 /**
@@ -87,6 +96,9 @@ export const toolAnnotations: Record<string, ToolAnnotations> = {
   list_dependencies: RO,
   list_team_members: RO,
   describe_option_set: RO,
+  get_critical_path: RO,
+  get_schedule_health: RO,
+  get_resource_workload: RO,
   // Additive writes (create new records, don't overwrite/remove existing data)
   create_plan: ADD,
   add_bucket: ADD,
@@ -94,6 +106,7 @@ export const toolAnnotations: Record<string, ToolAnnotations> = {
   add_tasks: ADD,
   add_tasks_batch: ADD,
   start_change_session: ADD,
+  assign_task: UPDATE,
   // Updates (overwrite existing field values)
   update_tasks: UPDATE,
   update_tasks_batch: UPDATE,
