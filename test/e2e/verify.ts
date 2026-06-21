@@ -39,7 +39,7 @@ export async function verifyTaskCount(
   bearer: string,
 ): Promise<{ count: number; truncated: boolean }> {
   const data = await dvGet(
-    `/msdyn_projecttasks?$filter=_msdyn_project_value eq ${projectId}&$count=true&$top=0`,
+    `/msdyn_projecttasks?$filter=_msdyn_project_value eq ${projectId}&$count=true`,
     bearer,
   );
   return { count: data["@odata.count"] ?? 0, truncated: false };
