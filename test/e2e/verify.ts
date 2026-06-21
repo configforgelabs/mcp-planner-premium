@@ -168,7 +168,7 @@ export async function verifyTasksByFilter(
  */
 export async function verifyAssignmentCount(taskId: string, bearer: string): Promise<number> {
   const data = await dvGet(
-    `/msdyn_resourceassignments?$filter=_msdyn_taskid_value eq ${taskId}&$count=true&$top=0`,
+    `/msdyn_resourceassignments?$filter=_msdyn_taskid_value eq ${taskId}&$count=true`,
     bearer,
   );
   return data["@odata.count"] ?? 0;
@@ -180,7 +180,7 @@ export async function verifyAssignmentCount(taskId: string, bearer: string): Pro
  */
 export async function verifyDependencyCount(projectId: string, bearer: string): Promise<number> {
   const data = await dvGet(
-    `/msdyn_projecttaskdependencies?$filter=_msdyn_project_value eq ${projectId}&$count=true&$top=0`,
+    `/msdyn_projecttaskdependencies?$filter=_msdyn_project_value eq ${projectId}&$count=true`,
     bearer,
   );
   return data["@odata.count"] ?? 0;
