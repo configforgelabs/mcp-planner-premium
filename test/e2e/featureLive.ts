@@ -174,7 +174,8 @@ async function runWriteTier(bearer: string, port: number): Promise<void> {
   const url = `http://localhost:${port}/mcp`;
   await mcpInitialize(url, bearer);
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const planName = `ZZ-MCP-FEAT-${ts}`;
+  // ZZ-MCP-E2E- prefix so scripts/cleanup-e2e-plans.ts sweeps it up too.
+  const planName = `ZZ-MCP-E2E-FEAT-${ts}`;
   let projectId = "";
   const createdTaskIds: string[] = [];
 
@@ -250,14 +251,23 @@ async function runWriteTier(bearer: string, port: number): Promise<void> {
     fails.push(`write tier threw: ${e instanceof Error ? e.message : String(e)}`);
     console.log(`  ❌ write tier exception — ${e instanceof Error ? e.message : String(e)}`);
   } finally {
-    // Best-effort cleanup of remaining tasks (whole-plan delete is blocked by policy).
-    if (projectId && createdTaskIds.length > 0) {
+    // On full success, delete the whole test plan out-of-band — PSS blocks
+    // in-tool whole-plan delete by policy, but a direct OData DELETE is allowed
+    // for test cleanup (PSS-IMPLEMENTATION-LESSONS §4). On failure, keep it for
+    // debugging (it is sweepable by scripts/cleanup-e2e-plans.ts).
+    if (projectId && fail === 0) {
       try {
-        const s = await call(url, "start_change_session", { projectId, description: "cleanup" }, bearer);
-        await mcpCall(url, "delete_tasks_batch", { operationSetId: s.operationSetId, projectId, taskIds: createdTaskIds, confirmed: true }, bearer);
-        await mcpCall(url, "apply_changes", { operationSetId: s.operationSetId }, bearer);
-        console.log(`  ℹ️  cleaned up ${createdTaskIds.length} task(s); plan "${planName}" left behind (whole-plan delete blocked).`);
-      } catch { /* best effort */ }
+        const cfg = getConfig();
+        await fetch(`${cfg.DATAVERSE_ORG_URL}/api/data/v9.2/msdyn_projects(${projectId})`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${bearer}`, "OData-Version": "4.0", "OData-MaxVersion": "4.0" },
+        });
+        console.log(`  ℹ️  deleted test plan "${planName}" (out-of-band whole-plan delete).`);
+      } catch {
+        console.log(`  ℹ️  plan "${planName}" left behind (out-of-band delete failed; sweep with cleanup-e2e-plans.ts).`);
+      }
+    } else if (projectId) {
+      console.log(`  ℹ️  plan "${planName}" kept for debugging (failures present).`);
     }
     await new Promise<void>((r) => server.close(() => r()));
   }
