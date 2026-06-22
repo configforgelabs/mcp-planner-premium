@@ -17,7 +17,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:e2e": "tsc -p tsconfig.e2e.json --noEmit",
     "test": "LOG_LEVEL=silent vitest run",
-    "e2e": "tsx test/e2e/runner.ts"
+    "e2e": "tsx test/e2e/runner.ts",
+    "e2e:acceptance": "tsx test/e2e/pmOpsLive.ts",
+    "e2e:acceptance:rebuild": "REBUILD_SEED=1 tsx test/e2e/pmOpsLive.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

@@ -1,15 +1,16 @@
 /**
  * Live PM-operation + read-safety self-test against a KEPT board (never deleted).
  *
- * Builds (or reuses) a persistent, multi-level, multi-bucket board with a sprint
- * and dependencies, then exercises the PM "rearrange the plan" operations against
- * a fresh SCRATCH subtree (so the canonical board is never mutated), verifying
- * each via independent OData reads. Finally verifies the new cursor/offset
- * pagination reassembles to the exact OData $count with no gaps or duplicates.
+ * By default builds (or reuses) the LARGE board from test/e2e/fixtures/
+ * it-planner-board.json (642 tasks, multi-level, multi-bucket, dependencies) via
+ * the resumable seed builder — a wifi drop RESUMES from the last checkpoint, never
+ * a full rebuild. If the fixture is absent (or SMALL_BOARD=1) it falls back to a
+ * 21-task synthetic board. Either way it then exercises the PM "rearrange the plan"
+ * operations against a fresh SCRATCH subtree (canonical board never mutated),
+ * verifies each via independent OData, and verifies the cursor/offset pagination
+ * reassembles to the exact OData $count. Writes pm-acceptance-report-<UTC>.md.
  *
- * Writes a PM-team-facing report: pm-acceptance-report-<UTC>.md (same format as
- * the full-board acceptance run). The board (ZZ-MCP-E2E-SEED-*) is LEFT INTACT;
- * only the per-run scratch subtree is cleaned up.
+ * The board is LEFT INTACT; only the per-run scratch subtree is cleaned up.
  *
  * Usage (airplane + NordVPN needs the NODE_OPTIONS prefix):
  *   export E2E_ACCESS_TOKEN=$(NODE_OPTIONS='--no-network-family-autoselection --dns-result-order=ipv4first' \
@@ -17,13 +18,17 @@
  *   NODE_OPTIONS='--no-network-family-autoselection --dns-result-order=ipv4first' \
  *     DATAVERSE_LINK_TYPE_STYLE=eu REQUEST_TIMEOUT_MS=120000 E2E_TOOL_TIMEOUT_MS=290000 \
  *     npx tsx --env-file .env test/e2e/pmOpsLive.ts
+ *   # SMALL_BOARD=1 forces the 21-task board; REBUILD_SEED=1 forces a fresh large build.
  */
 
 import { createServer, type Server } from "node:http";
-import { writeFile } from "node:fs/promises";
+import { writeFile, readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { getConfig, redact } from "./config.js";
 import { mcpCall, mcpInitialize } from "./mcpClient.js";
-import { verifyTaskField, verifyTaskCount, verifyTaskDeleted } from "./verify.js";
+import { verifyTaskField, verifyTaskCount, verifyTaskDeleted, verifyPlanExists } from "./verify.js";
+import { buildOrReuseSeed, type BuildCtx } from "./seed/builder.js";
+import type { Fixture } from "./seed/hashFixture.js";
 
 // ── Result recording (drives both the console + the markdown report) ──────────
 type Status = "pass" | "fail" | "info";
@@ -54,9 +59,9 @@ async function bootServer(port: number): Promise<Server> {
   resetEnvCache();
   const { buildApp } = await import("../../src/app.js");
   const app = buildApp();
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve_, reject) => {
     const srv = createServer(app);
-    srv.listen(port, () => resolve(srv));
+    srv.listen(port, () => resolve_(srv));
     srv.once("error", reject);
   });
 }
@@ -94,7 +99,6 @@ async function call(tool: string, args: Record<string, unknown>, attempts = 4): 
   }
   throw lastErr;
 }
-/** Open a session, run a mutation, apply. */
 async function inSession(projectId: string, fn: (opSet: string) => Promise<void>): Promise<void> {
   const s = await call("start_change_session", { projectId });
   await fn(s.operationSetId);
@@ -103,14 +107,24 @@ async function inSession(projectId: string, fn: (opSet: string) => Promise<void>
 
 interface Board {
   projectId: string;
-  buckets: Record<string, string>;
+  buckets: Record<string, string>; // name -> bucketId
+  bucketNames: string[]; // ordered; scenarios pick by index (board-agnostic)
   sprintName: string;
   name: string;
   taskCount: number;
 }
 
-const NEEDED_BUCKETS = ["Backlog", "In Progress", "Done"];
 const SPRINT = "Sprint A";
+const FIXTURE_PATH = resolve(process.cwd(), "test/e2e/fixtures/it-planner-board.json");
+
+async function loadFixture(): Promise<Fixture | null> {
+  if (/^(1|true)$/i.test(process.env.SMALL_BOARD || "")) return null;
+  try {
+    return JSON.parse(await readFile(FIXTURE_PATH, "utf8")) as Fixture;
+  } catch {
+    return null;
+  }
+}
 
 async function sprintExists(projectId: string, name: string): Promise<boolean> {
   const cfg = getConfig();
@@ -125,17 +139,58 @@ async function sprintExists(projectId: string, name: string): Promise<boolean> {
   return (data.value?.length ?? 0) > 0;
 }
 
-async function ensureBoard(): Promise<Board> {
-  const plans = await call("list_plans", { limit: 25 });
-  const existing = (plans.plans ?? []).find(
-    (p: any) => typeof p.name === "string" && p.name.startsWith("ZZ-MCP-E2E-SEED"),
-  );
+async function ensureSprint(projectId: string): Promise<void> {
+  if (!(await sprintExists(projectId, SPRINT))) {
+    await call("add_sprint", { projectId, name: SPRINT, start: "2026-07-01", finish: "2026-07-14" });
+  }
+}
 
+/** Build-or-reuse the LARGE board from the fixture (resumable; kept). */
+async function ensureLargeBoard(fixture: Fixture): Promise<Board> {
+  const cfg = getConfig();
+  const planName = process.env.SEED_PLAN_NAME || "ZZ-MCP-SEED-itboard";
+  const linkStyle = (process.env.DATAVERSE_LINK_TYPE_STYLE === "global" ? "global" : "eu") as "eu" | "global";
+  const t0 = Date.now();
+  const ctx: BuildCtx = {
+    call,
+    orgUrl: cfg.DATAVERSE_ORG_URL,
+    planName,
+    linkStyle,
+    probePlanExists: (pid) => verifyPlanExists(pid, BEARER),
+    probeTaskCount: async (pid) => {
+      try {
+        return (await verifyTaskCount(pid, BEARER)).count;
+      } catch {
+        return null;
+      }
+    },
+    forceRebuild: /^(1|true)$/i.test(process.env.REBUILD_SEED || ""),
+    log: (m) => console.log(`  · ${m}`),
+  };
+  const cache = await buildOrReuseSeed(ctx, fixture);
+  const projectId = cache.projectId!;
+  await ensureSprint(projectId);
+  const count = await verifyTaskCount(projectId, BEARER);
+  const bucketNames = Object.keys(cache.buckets);
+  check(
+    `build/reuse large board from fixture (${fixture.taskCount}-task it-planner-board)`,
+    "seed builder",
+    Date.now() - t0,
+    count.count >= fixture.taskCount,
+    `${count.count} tasks · ${bucketNames.length} buckets · ${cache.dependencyIds.length} deps · ${cache.checkpoint.failedDeps.length} PSS-refused`,
+  );
+  return { projectId, buckets: { ...cache.buckets }, bucketNames, sprintName: SPRINT, name: planName, taskCount: count.count };
+}
+
+/** Fallback 21-task synthetic board (when the fixture is absent / SMALL_BOARD=1). */
+async function ensureSmallBoard(): Promise<Board> {
+  const NEEDED = ["Backlog", "In Progress", "Done"];
+  const plans = await call("list_plans", { top: 50 });
+  const existing = (plans.plans ?? []).find((p: any) => typeof p.name === "string" && p.name.startsWith("ZZ-MCP-E2E-SEED"));
   let projectId: string;
   let name: string;
   const buckets: Record<string, string> = {};
   let isNew = false;
-
   if (existing) {
     projectId = existing.projectId;
     name = existing.name;
@@ -147,30 +202,22 @@ async function ensureBoard(): Promise<Board> {
     const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     name = `ZZ-MCP-E2E-SEED-${ts}`;
     const t0 = Date.now();
-    const plan = await call("create_plan", { subject: name, description: "persistent PM-ops board" });
-    projectId = plan.projectId;
+    projectId = (await call("create_plan", { subject: name, description: "persistent PM-ops board" })).projectId;
     isNew = true;
     check("create kept board", "create_plan", Date.now() - t0, !!projectId, name);
   }
-
-  for (const b of NEEDED_BUCKETS) {
-    if (!buckets[b]) buckets[b] = (await call("add_bucket", { projectId, name: b })).bucketId;
-  }
-  if (!(await sprintExists(projectId, SPRINT))) {
-    await call("add_sprint", { projectId, name: SPRINT, start: "2026-07-01", finish: "2026-07-14" });
-  }
-
+  for (const b of NEEDED) if (!buckets[b]) buckets[b] = (await call("add_bucket", { projectId, name: b })).bucketId;
+  await ensureSprint(projectId);
   if (isNew) {
     const t0 = Date.now();
     await inSession(projectId, async (opSet) => {
       const tasks: any[] = [];
       for (let p = 1; p <= 3; p++) {
-        tasks.push({ ref: `P${p}`, subject: `Phase ${p}`, bucket: NEEDED_BUCKETS[(p - 1) % 3] });
+        tasks.push({ ref: `P${p}`, subject: `Phase ${p}`, bucket: NEEDED[(p - 1) % 3] });
         for (let c = 1; c <= 2; c++) {
-          tasks.push({ ref: `P${p}C${c}`, subject: `Phase ${p} - Workstream ${c}`, bucket: NEEDED_BUCKETS[(p - 1) % 3], parent: `P${p}` });
+          tasks.push({ ref: `P${p}C${c}`, subject: `Phase ${p} - Workstream ${c}`, bucket: NEEDED[(p - 1) % 3], parent: `P${p}` });
           for (let g = 1; g <= 2; g++) {
-            const ref = `P${p}C${c}G${g}`;
-            const t: any = { ref, subject: `Task ${p}.${c}.${g}`, bucket: NEEDED_BUCKETS[(p - 1) % 3], parent: `P${p}C${c}`, finish: "2026-08-01T00:00:00Z" };
+            const t: any = { ref: `P${p}C${c}G${g}`, subject: `Task ${p}.${c}.${g}`, bucket: NEEDED[(p - 1) % 3], parent: `P${p}C${c}`, finish: "2026-08-01T00:00:00Z" };
             if (g === 2) t.dependsOn = [{ on: `P${p}C${c}G1`, type: "FS" }];
             tasks.push(t);
           }
@@ -180,21 +227,27 @@ async function ensureBoard(): Promise<Board> {
     });
     check("populate board (3 levels, FS dependencies)", "add_tasks", Date.now() - t0, true, "21 tasks across 3 buckets");
   }
-
   const count = await verifyTaskCount(projectId, BEARER);
-  return { projectId, buckets, sprintName: SPRINT, name, taskCount: count.count };
+  return { projectId, buckets, bucketNames: NEEDED, sprintName: SPRINT, name, taskCount: count.count };
 }
 
+async function ensureBoard(): Promise<Board> {
+  const fixture = await loadFixture();
+  return fixture ? ensureLargeBoard(fixture) : ensureSmallBoard();
+}
+
+/** Fresh scratch subtree under the board (parent + 3 leaves) in bucket0. */
 async function makeScratch(board: Board): Promise<{ parent: string; leaves: string[] }> {
+  const bk = board.bucketNames[0];
   let refs: Record<string, string> = {};
   await inSession(board.projectId, async (opSet) => {
     const r = await call("add_tasks", {
       operationSetId: opSet, projectId: board.projectId,
       tasks: [
-        { ref: "S", subject: "SCRATCH parent", bucket: "Backlog" },
-        { ref: "S1", subject: "SCRATCH leaf 1", bucket: "Backlog", parent: "S" },
-        { ref: "S2", subject: "SCRATCH leaf 2", bucket: "Backlog", parent: "S", finish: "2026-08-01T00:00:00Z" },
-        { ref: "S3", subject: "SCRATCH leaf 3", bucket: "Backlog", parent: "S", dependsOn: [{ on: "S2", type: "FS" }] },
+        { ref: "S", subject: "SCRATCH parent", bucket: bk },
+        { ref: "S1", subject: "SCRATCH leaf 1", bucket: bk, parent: "S" },
+        { ref: "S2", subject: "SCRATCH leaf 2", bucket: bk, parent: "S", finish: "2026-08-01T00:00:00Z" },
+        { ref: "S3", subject: "SCRATCH leaf 3", bucket: bk, parent: "S", dependsOn: [{ on: "S2", type: "FS" }] },
       ],
     });
     refs = r.taskRefs;
@@ -212,7 +265,7 @@ function renderReport(board: Board | null, runAt: string, org: string, durationM
   L.push("");
   L.push(`Run: \`${runAt}\`  ·  Org: \`${org}\`  ·  Duration: ${fmtMs(durationMs)}`);
   L.push(`Scope: PM task-change operations + large-plan read safety (cursor/offset pagination)`);
-  if (board) L.push(`Board: \`${board.name}\` (\`${board.projectId}\`) — ${board.taskCount} tasks, KEPT (never deleted); scenarios run against a disposable scratch subtree`);
+  if (board) L.push(`Board: \`${board.name}\` (\`${board.projectId}\`) — ${board.taskCount} tasks, ${board.bucketNames.length} buckets, KEPT (never deleted); scenarios run against a disposable scratch subtree`);
   L.push("");
   L.push(`## Overall: ${fail === 0 ? "✅ ALL PASS" : `❌ ${fail} FAILURE(S)`}`);
   L.push("");
@@ -222,14 +275,13 @@ function renderReport(board: Board | null, runAt: string, org: string, durationM
   L.push(`| Fail | ${fail} |`);
   L.push(`| Info (documented behaviour) | ${infoN} |`);
   L.push("");
-  const phases = [...new Set(rows.map((r) => r.phase))];
-  for (const ph of phases) {
+  for (const ph of [...new Set(rows.map((r) => r.phase))]) {
     L.push(`## ${ph}`);
     L.push("");
     L.push("| | Step | Tool | Latency | Evidence / Error |");
     L.push("|---|---|---|---|---|");
     for (const r of rows.filter((x) => x.phase === ph)) {
-      const detail = (r.status === "fail" ? `⚠️ ${r.evidence}` : r.evidence).replace(/\|/g, "\\|").slice(0, 140);
+      const detail = (r.status === "fail" ? `⚠️ ${r.evidence}` : r.evidence).replace(/\|/g, "\\|").slice(0, 160);
       L.push(`| ${icon(r.status)} | ${r.step} | \`${r.tool}\` | ${fmtMs(r.latencyMs)} | ${detail} |`);
     }
     L.push("");
@@ -263,9 +315,40 @@ async function main(): Promise<void> {
   let residue = "✅ scratch subtree cleaned; board kept (not deleted).";
 
   try {
-    setPhase("Setup — persistent board");
+    setPhase("Setup — persistent board (build once, reuse, never deleted)");
     board = await ensureBoard();
     const { projectId } = board;
+    const [bkA, bkB, bkC] = board.bucketNames;
+
+    let summaryTaskId = "";
+    let spotTaskId = "";
+    setPhase("Read-back verification (the build is faithful)");
+    {
+      let t = Date.now();
+      const summary = await call("get_plan_summary", { projectId });
+      check("get_plan_summary — total task count", "get_plan_summary", Date.now() - t, summary.totalTasks === board.taskCount, `totalTasks=${summary.totalTasks}, progress=${summary.progressPercent}%`);
+
+      t = Date.now();
+      const bb = await call("get_bucket_breakdown", { projectId });
+      check("get_bucket_breakdown — per-bucket counts", "get_bucket_breakdown", Date.now() - t, Array.isArray(bb.buckets) && bb.buckets.length > 0, `${bb.buckets?.length ?? 0} buckets`);
+
+      t = Date.now();
+      const deps = await call("list_dependencies", { projectId });
+      check("list_dependencies — dependency links present", "list_dependencies", Date.now() - t, typeof deps.count === "number", `${deps.count} dependency links`);
+
+      t = Date.now();
+      const contents = await call("get_plan_tasks_and_buckets", { projectId, limit: 1000 });
+      summaryTaskId = (contents.summaryTaskIds ?? [])[0] ?? "";
+      spotTaskId = contents.tasks?.[0]?.taskId ?? "";
+      const maxLevel = Math.max(0, ...(contents.tasks ?? []).map((x: any) => x.outlineLevel ?? 0));
+      check("get_plan_tasks_and_buckets — hierarchy + summary tasks", "get_plan_tasks_and_buckets", Date.now() - t, (contents.summaryTaskIds?.length ?? 0) > 0, `${contents.taskCount} tasks, ${contents.summaryTaskIds?.length ?? 0} summaries, max level ${maxLevel}`);
+
+      if (spotTaskId) {
+        t = Date.now();
+        const task = await call("get_task", { taskId: spotTaskId });
+        check("get_task — spot-check one task in full", "get_task", Date.now() - t, task.ok === true && !!task.task?.subject, String(task.task?.subject ?? "").slice(0, 40));
+      }
+    }
 
     setPhase("Scratch subtree (mutated then cleaned — board stays intact)");
     let t = Date.now();
@@ -276,9 +359,9 @@ async function main(): Promise<void> {
     setPhase("PM operations (verified via independent OData)");
 
     t = Date.now();
-    await inSession(projectId, async (op) => void (await call("update_tasks", { operationSetId: op, projectId, tasks: [{ taskId: scratch.leaves[0], bucket: "Done" }] })));
-    check("move a task to a different bucket (→ Done)", "update_tasks", Date.now() - t,
-      lc(await verifyTaskField(scratch.leaves[0], "_msdyn_projectbucket_value", BEARER)) === lc(board.buckets["Done"]), "bucket = Done");
+    await inSession(projectId, async (op) => void (await call("update_tasks", { operationSetId: op, projectId, tasks: [{ taskId: scratch.leaves[0], bucket: bkB }] })));
+    check(`move a task to a different bucket (→ ${bkB})`, "update_tasks", Date.now() - t,
+      lc(await verifyTaskField(scratch.leaves[0], "_msdyn_projectbucket_value", BEARER)) === lc(board.buckets[bkB]), `bucket = ${bkB}`);
 
     t = Date.now();
     await inSession(projectId, async (op) => void (await call("update_tasks", { operationSetId: op, projectId, tasks: [{ taskId: scratch.leaves[0], parent: scratch.leaves[1] }] })));
@@ -318,38 +401,94 @@ async function main(): Promise<void> {
 
     t = Date.now();
     await inSession(projectId, async (op) => void (await call("update_tasks", { operationSetId: op, projectId, tasks: [
-      { taskId: scratch.parent, bucket: "In Progress" },
-      { taskId: scratch.leaves[1], bucket: "In Progress" },
+      { taskId: scratch.parent, bucket: bkC },
+      { taskId: scratch.leaves[1], bucket: bkC },
     ] })));
-    check("bulk move (2 tasks in one operation set)", "update_tasks", Date.now() - t,
-      lc(await verifyTaskField(scratch.parent, "_msdyn_projectbucket_value", BEARER)) === lc(board.buckets["In Progress"]), "both re-bucketed");
+    check(`bulk move (2 tasks → ${bkC}, one operation set)`, "update_tasks", Date.now() - t,
+      lc(await verifyTaskField(scratch.parent, "_msdyn_projectbucket_value", BEARER)) === lc(board.buckets[bkC]), "both re-bucketed");
 
     info("not supported by the API (confirmed): reorder within a bucket, move to another plan, edit a dependency in place", "—",
       "PSS manages display order; cross-plan move + in-place dependency edits have no API path (delete + recreate)");
 
+    setPhase("Guardrails (negative tests — the safeguards hold)");
+    {
+      const s1 = await call("start_change_session", { projectId });
+      let t = Date.now();
+      const big = await mcpCall(URL_, "add_tasks_batch", { operationSetId: s1.operationSetId, entities: Array.from({ length: 201 }, () => ({ "@odata.type": "Microsoft.Dynamics.CRM.msdyn_projecttask" })) }, BEARER);
+      check(">200-entity batch rejected", "add_tasks_batch", Date.now() - t, big.isError === true && /200/.test(JSON.stringify(big.content)), "max 200 enforced");
+
+      t = Date.now();
+      const del = await mcpCall(URL_, "delete_tasks_batch", { operationSetId: s1.operationSetId, taskIds: [spotTaskId || projectId], confirmed: false }, BEARER);
+      check("delete without confirmed rejected", "delete_tasks_batch", Date.now() - t, del.isError === true && /confirm/i.test(JSON.stringify(del.content)), "confirmed gate");
+
+      t = Date.now();
+      const whole = await mcpCall(URL_, "delete_tasks_batch", { operationSetId: s1.operationSetId, records: [{ entityLogicalName: "msdyn_project", recordId: projectId }], confirmed: true }, BEARER);
+      check("whole-plan delete hard-blocked", "delete_tasks_batch", Date.now() - t, whole.isError === true && /blocked by policy|whole plan/i.test(JSON.stringify(whole.content)), "policy block");
+
+      t = Date.now();
+      const badg = await mcpCall(URL_, "update_tasks", { operationSetId: s1.operationSetId, projectId, tasks: [{ taskId: "not-a-guid", subject: "x" }] }, BEARER);
+      check("invalid GUID rejected", "update_tasks", Date.now() - t, badg.isError === true && /guid/i.test(JSON.stringify(badg.content)), "GUID validation");
+
+      if (summaryTaskId) {
+        t = Date.now();
+        const sum = await mcpCall(URL_, "update_tasks", { operationSetId: s1.operationSetId, projectId, tasks: [{ taskId: summaryTaskId, finish: "2027-12-31T00:00:00Z" }] }, BEARER);
+        check("summary-task rolled-up date overwrite rejected", "update_tasks", Date.now() - t, sum.isError === true && /summary/i.test(JSON.stringify(sum.content)), "summary protection");
+      }
+      await mcpCall(URL_, "cancel_change_session", { operationSetId: s1.operationSetId }, BEARER).catch(() => {});
+    }
+
+    setPhase("Capability behaviours (documented limits)");
+    {
+      let t = Date.now();
+      const team = await call("list_team_members", { projectId });
+      const member = (team.members ?? team.teamMembers ?? [])[0];
+      check("list_team_members (plan auto-includes the creator)", "list_team_members", Date.now() - t, !!member?.name, member?.name ?? "n/a");
+
+      t = Date.now();
+      await inSession(projectId, async (op) => {
+        const r = await call("add_tasks", {
+          operationSetId: op, projectId,
+          tasks: [{
+            ref: "CAP", subject: "Capability check task", bucket: bkA,
+            milestone: true, checklist: ["item A", "item B"], sprint: board!.sprintName,
+            ...(member?.name ? { assignees: [member.name] } : {}),
+            labels: ["ZZ-Nonexistent-Label"],
+          }],
+        });
+        const capId = r.taskRefs?.CAP;
+        if (capId) scratchIds.push(capId);
+        const milestoneDeferred = (r.milestoneTaskIds?.length ?? 0) >= 1;
+        const checklistMade = (r.checklistIds?.length ?? 0) >= 1;
+        const labelWarned = Array.isArray(r.warnings) && r.warnings.some((w: string) => /label/i.test(w));
+        check("checklist + sprint + assignee on one task; milestone deferred; label UI-only warned", "add_tasks", Date.now() - t,
+          milestoneDeferred && checklistMade && labelWarned, `${r.checklistIds?.length ?? 0} checklist items; milestone→milestoneTaskIds; label skipped+warned`);
+      });
+    }
+
     setPhase("Read safety at scale (cursor / offset pagination)");
+    const pageLimit = board.taskCount > 60 ? 50 : 3;
     t = Date.now();
     {
       const direct = await verifyTaskCount(projectId, BEARER);
       const seen = new Set<string>();
       let token: string | undefined; let pages = 0;
       do {
-        const r: any = await call("get_plan_tasks_and_buckets", { projectId, limit: 3, ...(token ? { pageToken: token } : {}) });
+        const r: any = await call("get_plan_tasks_and_buckets", { projectId, limit: pageLimit, ...(token ? { pageToken: token } : {}) });
         for (const x of r.tasks) seen.add(lc(x.taskId));
         token = r.nextPageToken; pages++;
-      } while (token && pages < 200);
+      } while (token && pages < 1000);
       check("get_plan_tasks_and_buckets paginates to the exact OData $count (no gaps/dupes)", "get_plan_tasks_and_buckets", Date.now() - t,
-        seen.size === direct.count, `${seen.size} tasks over ${pages} pages == $count ${direct.count}`);
+        seen.size === direct.count, `${seen.size} tasks over ${pages} pages (limit ${pageLimit}) == $count ${direct.count}`);
     }
     t = Date.now();
     {
       const seen = new Set<string>(); let token: string | undefined; let total = -1; let pages = 0;
       do {
-        const r: any = await call("list_plan_tasks", { projectId, filter: "all", limit: 3, ...(token ? { pageToken: token } : {}) });
+        const r: any = await call("list_plan_tasks", { projectId, filter: "all", limit: pageLimit, ...(token ? { pageToken: token } : {}) });
         for (const x of r.tasks) seen.add(lc(x.taskId));
         total = r.totalMatched; token = r.nextPageToken; pages++;
-      } while (token && pages < 200);
-      check("list_plan_tasks offset paging reassembles to totalMatched", "list_plan_tasks", Date.now() - t, seen.size === total, `${seen.size}/${total} over ${pages} pages`);
+      } while (token && pages < 1000);
+      check("list_plan_tasks offset paging reassembles to totalMatched", "list_plan_tasks", Date.now() - t, seen.size === total, `${seen.size}/${total} over ${pages} pages (limit ${pageLimit})`);
     }
   } catch (e) {
     rows.push({ phase: curPhase || "Run", status: "fail", step: "unexpected exception", tool: "—", latencyMs: 0, evidence: e instanceof Error ? e.message : String(e) });
@@ -371,7 +510,6 @@ async function main(): Promise<void> {
     await new Promise<void>((r) => server.close(() => r()));
   }
 
-  // Write the PM-team-facing report.
   const report = renderReport(board, runAt, cfg.DATAVERSE_ORG_URL, Date.now() - t0, residue);
   const file = `pm-acceptance-report-${runAt.replace(/[:.]/g, "-").slice(0, 19)}.md`;
   await writeFile(file, report, "utf-8");

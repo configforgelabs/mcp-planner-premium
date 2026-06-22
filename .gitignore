@@ -12,6 +12,9 @@ test/e2e/fixtures/it-planner-board.json
 pm-acceptance-report-*.md
 e2e-report-*.md
 
+# Seed-board cache: holds real task GUIDs/names from the fixture build — keep local
+.e2e-seed-cache.json
+
 # Claude Code: personal, per-user overrides (shared config lives in .claude/settings.json)
 .claude/settings.local.json
 

@@ -77,6 +77,9 @@ export interface SeedCache {
   taskGuidByNumber: Record<string, string>;
   /** Dataverse IDs of created msdyn_projecttaskdependency records. */
   dependencyIds: string[];
+  /** "pred:succ" taskNumber pairs already created — lets a resumed deps phase
+   * skip them so it never duplicates a dependency. Optional for back-compat. */
+  dependencyPairs?: string[];
   /** taskNumbers of summary tasks (have children) — for safe-write targeting. */
   summaryTaskNumbers: number[];
   checkpoint: CacheCheckpoint;
