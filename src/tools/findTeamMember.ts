@@ -1,15 +1,17 @@
 import { z } from "zod";
 import { getApiBase } from "../config.js";
 import { dvReq, dvHeaders, dvErrorMessage, assertGuid } from "../dataverse.js";
+import { resolveResourceIdentities } from "./identity.js";
 import type { ToolDef } from "./types.js";
 
 // Find Team Member - resolve project team member(s) by display name for ONE plan.
-// Returns teamMemberId (projectteamid) + bookableResourceId for msdyn_resourceassignment.
+// Returns teamMemberId (projectteamid) + bookableResourceId for msdyn_resourceassignment,
+// plus the person's UPN / email / full name (resolved via bookable resource → systemuser).
 export const findTeamMember: ToolDef = {
   name: "find_team_member",
   title: "Find Team Member",
   description:
-    "Resolves project team members by display name for ONE plan. Returns projectteamid AND bookableresourceid needed for msdyn_resourceassignment entities. Use BEFORE adding assignments. If no team member matches, the person must first be added to the plan in the Planner UI - never guess GUIDs.",
+    "Resolves project team members by display name for ONE plan. Returns projectteamid AND bookableresourceid (needed for msdyn_resourceassignment), plus the person's upn, email and fullName (resolved via the bookable resource's systemuser) so you can disambiguate two people with the same display name. Use BEFORE adding assignments. If no team member matches, the person must first be added to the plan in the Planner UI - never guess GUIDs. To search ALL plans at once, use find_team_member_across_plans.",
   inputSchema: {
     projectId: z.string().describe("GUID of the plan (msdyn_projectid)."),
     name: z
@@ -53,13 +55,28 @@ export const findTeamMember: ToolDef = {
     }
 
     const target = name.toLowerCase();
-    const members = (body.value || []).map((m: any) => ({
+    const rawMembers = (body.value || []).map((m: any) => ({
       teamMemberId: m.msdyn_projectteamid,
       name: m.msdyn_name,
       bookableResourceId: m._msdyn_bookableresourceid_value,
       exactMatch:
         typeof m.msdyn_name === "string" && m.msdyn_name.trim().toLowerCase() === target,
     }));
+
+    // Enrich with UPN / email / full name (fail-soft: nulls if unresolved).
+    const identities = await resolveResourceIdentities(
+      BASE,
+      rawMembers.map((m: any) => m.bookableResourceId).filter(Boolean),
+    );
+    const members = rawMembers.map((m: any) => {
+      const id = m.bookableResourceId ? identities.get(String(m.bookableResourceId).toLowerCase()) : undefined;
+      return {
+        ...m,
+        upn: id?.upn ?? null,
+        email: id?.email ?? null,
+        fullName: id?.fullName ?? null,
+      };
+    });
     members.sort((a: any, b: any) => {
       if (a.exactMatch !== b.exactMatch) return a.exactMatch ? -1 : 1;
       return 0;

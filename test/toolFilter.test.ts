@@ -3,15 +3,18 @@ import { filterTools, TOOLSETS } from "../src/toolFilter.js";
 import { allTools, toolAnnotations } from "../src/tools/index.js";
 import type { ToolFilterEnv } from "../src/toolFilter.js";
 
-// Read-only tool names (14 original + 3 analytics tools added in this wave).
+// Read-only tool names (14 original + 3 analytics tools + 2 member-info/user-task
+// tools added in feat/member-info-and-user-tasks).
 const READ_ONLY_TOOL_NAMES = new Set([
   "check_change_session_status",
   "find_plan_by_name",
   "find_team_member",
+  "find_team_member_across_plans",
   "get_plan_tasks_and_buckets",
   "whoami",
   "list_plans",
   "list_my_tasks",
+  "list_user_tasks",
   "get_plan_summary",
   "get_task",
   "list_plan_tasks",
@@ -130,32 +133,32 @@ describe("filterTools — ENABLED_TOOLS", () => {
 });
 
 describe("filterTools — TOOLSETS", () => {
-  it("reporting toolset returns 7 tools", () => {
+  it("reporting toolset returns 8 tools", () => {
     const { tools } = filterTools(allTools, toolAnnotations, {
       readOnly: false,
       toolsets: ["reporting"],
     });
-    expect(tools).toHaveLength(7);
+    expect(tools).toHaveLength(8);
     const names = new Set(tools.map((t) => t.name));
     for (const name of TOOLSETS["reporting"]) {
       expect(names.has(name)).toBe(true);
     }
   });
 
-  it("discovery toolset returns 6 tools", () => {
+  it("discovery toolset returns 7 tools", () => {
     const { tools } = filterTools(allTools, toolAnnotations, {
       readOnly: false,
       toolsets: ["discovery"],
     });
-    expect(tools).toHaveLength(6);
+    expect(tools).toHaveLength(7);
   });
 
-  it("reporting + sessions union returns 11 tools (no duplicates)", () => {
+  it("reporting + sessions union returns 12 tools (no duplicates)", () => {
     const { tools } = filterTools(allTools, toolAnnotations, {
       readOnly: false,
       toolsets: ["reporting", "sessions"],
     });
-    expect(tools).toHaveLength(11);
+    expect(tools).toHaveLength(12);
     // Check no duplicates
     const names = tools.map((t) => t.name);
     const unique = new Set(names);

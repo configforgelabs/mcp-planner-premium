@@ -95,17 +95,19 @@ means the server is not dangerous even when used from a host with no skill loade
 | `check_change_session_status` | Poll a session (or list open sessions) |
 | `cancel_change_session` | Abandon a change session |
 | `find_plan_by_name` | Resolve a plan by name |
-| `find_team_member` | Resolve a team member by name |
+| `find_team_member` | Resolve a team member by name for one plan — returns `bookableResourceId` + UPN/email/full name |
+| `find_team_member_across_plans` | Find a person by name across **all** plans at once; groups by person with UPN/email and the plans they're on — read |
 | `get_plan_tasks_and_buckets` | Full task + bucket list with `summaryTaskIds` |
 | `whoami` | Diagnostic: confirms signed-in user and token |
 | `list_plans` | Recent plans (name, dates, progress, effort) — read |
 | `list_my_tasks` | The signed-in user's tasks across plans (`all`/`overdue`/`active`) — read |
+| `list_user_tasks` | A **specific** person's tasks (by `bookableResourceId`) across plans (`all`/`overdue`/`active`) — read |
 | `get_plan_summary` | Plan rollup: dates, %, effort, task/milestone/overdue counts — read |
 | `get_task` | One task in full + dependency links + assignments — read |
 | `list_plan_tasks` | Filtered task list (`all` / `overdue` / `milestones`, optional bucket) — read |
 | `get_bucket_breakdown` | Per-bucket task count + avg progress — read |
 | `list_dependencies` | All predecessor→successor links (type + lag) — read |
-| `list_team_members` | All plan team members — read |
+| `list_team_members` | All plan team members, each with `bookableResourceId` + UPN/email/full name — read |
 | `describe_option_set` | Choice-column values + labels (e.g. link types, status) — read |
 | `get_critical_path` | Critical-path chain with per-task total float (slack) in working days — read |
 | `get_schedule_health` | Schedule-risk rollup: overdue, at-risk, blocked, milestones, slipping summaries — read |

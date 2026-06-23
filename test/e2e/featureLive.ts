@@ -37,6 +37,14 @@ let pass = 0;
 let fail = 0;
 const fails: string[] = [];
 
+/** Masks a UPN/email for log output (PII): "marcin.b@opsora.io" → "ma***@opsora.io". */
+function maskUpn(v: unknown): string {
+  if (!v || typeof v !== "string") return "null";
+  if (!v.includes("@")) return v.slice(0, 2) + "***";
+  const [local, domain] = v.split("@");
+  return local.slice(0, 2) + "***@" + domain;
+}
+
 function ok(cond: boolean, label: string, evidence = ""): boolean {
   if (cond) {
     pass++;
@@ -130,6 +138,40 @@ async function main(): Promise<void> {
       ok(lpt?.ok === true && Array.isArray(lpt.tasks) && lpt.tasks.length > 0,
         "list_plan_tasks → ok + tasks (extended fields when available)",
         `tasks=${lpt.tasks?.length ?? "?"}, extendedFields=${extPresent ? "present" : "absent (basic tenant, graceful)"}`);
+
+      // ── Tier 1.5: project member info (UPN/email) + per-user tasks ──────────
+      // Proves the flow "which tasks does <name> have?": list/find members with
+      // UPN, search a name across plans, then read that person's tasks.
+      console.log("\nTier 1.5 — project member info (UPN/email) + list_user_tasks:");
+      const ltm = await call(url, "list_team_members", { projectId }, bearer);
+      const members: any[] = ltm.members ?? [];
+      const resolved = members.filter((m) => m.upn || m.email);
+      ok(ltm?.ok === true && members.length > 0, "list_team_members → ok + members[]", `members=${members.length}`);
+      // The headline check you asked for: member identity (UPN/email) is findable.
+      ok(resolved.length > 0, "list_team_members resolves UPN/email for ≥1 member",
+        `${resolved.length}/${members.length} resolved (e.g. ${maskUpn(resolved[0]?.upn ?? resolved[0]?.email)})`);
+
+      const probe = resolved[0] ?? members[0];
+      if (probe?.name) {
+        const ftm = await call(url, "find_team_member", { projectId, name: probe.name }, bearer);
+        const hit = (ftm.members ?? [])[0];
+        ok(ftm?.ok === true && !!hit, "find_team_member resolves a name → member", `name="${probe.name}"`);
+        ok(!!hit && "upn" in hit, "find_team_member result carries upn/email field",
+          `upn=${maskUpn(hit?.upn ?? hit?.email)}`);
+
+        const xplan = await call(url, "find_team_member_across_plans", { name: probe.name }, bearer);
+        const person = (xplan.people ?? [])[0];
+        ok(xplan?.ok === true && (xplan.people?.length ?? 0) > 0,
+          "find_team_member_across_plans finds the person across plans",
+          `people=${xplan.people?.length ?? 0}, plans=${person?.planCount ?? "?"}, upn=${maskUpn(person?.upn ?? person?.email)}`);
+      }
+
+      if (probe?.bookableResourceId) {
+        const lut = await call(url, "list_user_tasks", { bookableResourceId: probe.bookableResourceId, filter: "active" }, bearer);
+        ok(lut?.ok === true && Array.isArray(lut.tasks),
+          "list_user_tasks → ok + tasks[] for that person",
+          `count=${lut.count ?? "?"}${lut.note ? ` (note: ${lut.note})` : ""}`);
+      }
     }
   } finally {
     await new Promise<void>((r) => mainServer.close(() => r()));
@@ -147,6 +189,8 @@ async function main(): Promise<void> {
       "read-only server hides write tools", `${names.length} tools advertised`);
     ok(names.includes("get_critical_path") && names.includes("list_plans"),
       "read-only server keeps read tools");
+    ok(names.includes("list_user_tasks") && names.includes("find_team_member_across_plans"),
+      "read-only server advertises the new member-info/user-task read tools");
     const blocked = await mcpCall(roUrl, "create_plan", { subject: "ZZ-should-be-blocked" }, bearer);
     ok(blocked.isError === true, "create_plan rejected under READ_ONLY_MODE",
       JSON.stringify(blocked.content).slice(0, 80));

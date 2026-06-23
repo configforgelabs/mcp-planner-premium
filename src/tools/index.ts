@@ -15,10 +15,12 @@ import { checkStatus } from "./checkStatus.js";
 import { cancelSession } from "./cancelSession.js";
 import { findPlan } from "./findPlan.js";
 import { findTeamMember } from "./findTeamMember.js";
+import { findTeamMemberAcrossPlans } from "./findTeamMemberAcrossPlans.js";
 import { getPlanContents } from "./getPlanContents.js";
 import { whoami } from "./whoami.js";
 import { listPlans } from "./listPlans.js";
 import { listMyTasks } from "./listMyTasks.js";
+import { listUserTasks } from "./listUserTasks.js";
 import { getPlanSummary } from "./getPlanSummary.js";
 import { getTask } from "./getTask.js";
 import { listPlanTasks } from "./listPlanTasks.js";
@@ -51,12 +53,14 @@ export const allTools: ToolDef[] = [
   cancelSession,
   findPlan,
   findTeamMember,
+  findTeamMemberAcrossPlans,
   getPlanContents,
   whoami,
   // Reporting / read tools (replace the generic Dataverse MCP for the Planner
   // workflow). All read-only.
   listPlans,
   listMyTasks,
+  listUserTasks,
   getPlanSummary,
   getTask,
   listPlanTasks,
@@ -84,11 +88,13 @@ export const toolAnnotations: Record<string, ToolAnnotations> = {
   // Reads
   find_plan_by_name: RO,
   find_team_member: RO,
+  find_team_member_across_plans: RO,
   get_plan_tasks_and_buckets: RO,
   check_change_session_status: RO,
   whoami: RO,
   list_plans: RO,
   list_my_tasks: RO,
+  list_user_tasks: RO,
   get_plan_summary: RO,
   get_task: RO,
   list_plan_tasks: RO,

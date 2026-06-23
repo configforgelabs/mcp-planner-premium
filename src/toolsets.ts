@@ -18,6 +18,7 @@ export const TOOLSETS: Record<string, readonly string[]> = {
   reporting: [
     "list_plans",
     "list_my_tasks",
+    "list_user_tasks",
     "get_plan_summary",
     "get_task",
     "list_plan_tasks",
@@ -27,6 +28,7 @@ export const TOOLSETS: Record<string, readonly string[]> = {
   discovery: [
     "find_plan_by_name",
     "find_team_member",
+    "find_team_member_across_plans",
     "get_plan_tasks_and_buckets",
     "list_team_members",
     "whoami",
