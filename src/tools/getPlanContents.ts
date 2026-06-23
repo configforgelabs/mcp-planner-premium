@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { getApiBase } from "../config.js";
 import { assertGuid, isGuid } from "../dataverse.js";
-import { pageAll, readHeaders, pageOnce, clampLimit, SAFE_PAGE_SIZE } from "./readHelpers.js";
+import { pageAll, readHeaders, pageByOffset, clampLimit, SAFE_PAGE_SIZE } from "./readHelpers.js";
 import type { ToolDef } from "./types.js";
 
 /** A task is a summary if some other task names it as its parent. */
@@ -92,29 +92,16 @@ export const getPlanContents: ToolDef = {
       taskFilter +
       "&$orderby=msdyn_displaysequence asc";
 
-    // One bounded page of full task rows.
-    const page = await pageOnce(tasksUrl, limit, pageToken);
-    const pageRows = page.rows;
+    // Read EVERY matching task row once (server-side paged, hard-capped at 10k).
+    // This single scan yields BOTH the page we return AND the complete summary
+    // set, so isSummary/summaryTaskIds stay correct across pages — and it lets us
+    // hand the model a SHORT numeric-offset cursor instead of a long Dataverse
+    // $skiptoken, which MCP hosts truncate/corrupt when the model echoes it back.
+    const paged = await pageAll(tasksUrl, readHeaders());
+    const allRows = paged.rows;
+    const summarySet = parentIdSet(allRows);
 
-    // Summary set. When the whole plan fits in this single page (no token in,
-    // no token out) compute it from the page — one query, same as before. When
-    // paginating, run a lightweight id+parent scan of the WHOLE plan so isSummary
-    // and summaryTaskIds are complete even though we return only one page.
-    let summarySet: Set<string>;
-    let summaryScanTruncated = false;
-    if (!pageToken && !page.nextPageToken) {
-      summarySet = parentIdSet(pageRows);
-    } else {
-      const scanUrl =
-        BASE +
-        "/msdyn_projecttasks?$select=msdyn_projecttaskid,_msdyn_parenttask_value&$filter=" +
-        taskFilter;
-      const scan = await pageAll(scanUrl, readHeaders());
-      summaryScanTruncated = scan.truncated;
-      summarySet = parentIdSet(scan.rows);
-    }
-
-    const tasks = pageRows.map((t: any) => {
+    const allTasks = allRows.map((t: any) => {
       const id = t.msdyn_projecttaskid;
       return {
         taskId: id,
@@ -132,23 +119,28 @@ export const getPlanContents: ToolDef = {
     });
 
     // A parent-value id is, by definition, a summary task's id. This list is
-    // complete across pages (built from the page or the full id+parent scan).
+    // complete across pages (built from the full scan above).
     const summaryTaskIds = [...summarySet];
 
-    const hasMore = !!page.nextPageToken;
+    // Return ONE host-safe page via a short, model-friendly offset cursor.
+    const page = pageByOffset(allTasks, limit, pageToken);
+    const tasks = page.items;
+    const hasMore = page.hasMore;
     return {
       ok: true,
       projectId: projectId,
-      truncated: bucketsPaged.truncated || summaryScanTruncated,
+      truncated: bucketsPaged.truncated || paged.truncated,
       pageLimit: limit,
       hasMore: hasMore,
       nextPageToken: page.nextPageToken,
       ...(hasMore
         ? {
             note:
-              "Incomplete: this is one page of the plan's tasks (taskCount=" +
+              "Incomplete: returned " +
               tasks.length +
-              "). Call get_plan_tasks_and_buckets again with this pageToken and keep paging until hasMore is false before treating the task list as complete.",
+              " of " +
+              allTasks.length +
+              " tasks. Call get_plan_tasks_and_buckets again with this pageToken and keep paging until hasMore is false before treating the task list as complete.",
           }
         : {}),
       buckets: bucketsPaged.rows.map((b: any) => ({
@@ -156,6 +148,7 @@ export const getPlanContents: ToolDef = {
         name: b.msdyn_name,
       })),
       taskCount: tasks.length,
+      totalTaskCount: allTasks.length,
       summaryTaskIds: summaryTaskIds,
       tasks: tasks,
     };

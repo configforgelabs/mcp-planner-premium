@@ -231,6 +231,48 @@ export function fitToBudget<T>(
   return { items: items.slice(0, best), fits: false };
 }
 
+export interface OffsetPage<T> {
+  items: T[];
+  nextPageToken?: string;
+  hasMore: boolean;
+  /** false when fitToBudget had to drop trailing rows to stay under the char cap. */
+  fits: boolean;
+}
+
+/**
+ * Slices an already-materialised array into ONE host-safe page using a SHORT,
+ * model-friendly cursor: an opaque base64url-wrapped numeric offset (e.g. "MjAw"
+ * = 200), NOT a long Dataverse $skiptoken. A short integer is the only kind of
+ * cursor an MCP host's model reliably echoes back to fetch the next page — long
+ * opaque cursors get truncated/corrupted in transit, stalling pagination. The
+ * slice is byte-budgeted with fitToBudget so variable-length rows can't push a
+ * page past a host's ~200k-char cap, and the cursor advances by exactly what is
+ * returned, so no row is ever dropped. A stale offset past the end yields an
+ * empty page with no token (paging simply stops).
+ */
+export function pageByOffset<T>(
+  all: T[],
+  limit: number,
+  pageToken?: string,
+  maxChars = RESPONSE_CHAR_BUDGET,
+): OffsetPage<T> {
+  let offset = 0;
+  if (pageToken) {
+    const raw = Buffer.from(pageToken, "base64url").toString("utf8");
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 0 || n > 10_000_000) throw new Error("Invalid pageToken.");
+    offset = n;
+  }
+  const fit = fitToBudget(all.slice(offset, offset + limit), maxChars);
+  const items = fit.items;
+  const nextOffset = offset + items.length;
+  const nextPageToken =
+    nextOffset < all.length
+      ? Buffer.from(String(nextOffset), "utf8").toString("base64url")
+      : undefined;
+  return { items, nextPageToken, hasMore: !!nextPageToken, fits: fit.fits };
+}
+
 /** Clamp a caller-supplied limit into [1, MAX_PAGE_SIZE]; undefined -> default. */
 export function clampLimit(limit: unknown): number {
   if (limit === undefined || limit === null) return DEFAULT_PAGE_SIZE;

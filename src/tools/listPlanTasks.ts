@@ -8,8 +8,7 @@ import {
   decodeDataverseText,
   clampLimit,
   SAFE_PAGE_SIZE,
-  RESPONSE_CHAR_BUDGET,
-  fitToBudget,
+  pageByOffset,
   type RawTask,
 } from "./readHelpers.js";
 
@@ -228,27 +227,14 @@ export const listPlanTasks: ToolDef = {
     // only caps what is RETURNED so the payload stays within the model's context
     // budget. pageToken is a private numeric offset, never a URL — SSRF-irrelevant.
     const limit = Math.min(clampLimit(input.limit), SAFE_PAGE_SIZE);
-    let offset = 0;
-    if (input.pageToken) {
-      const raw = Buffer.from(input.pageToken, "base64url").toString("utf8");
-      const n = Number(raw);
-      if (!Number.isInteger(n) || n < 0 || n > 10_000_000)
-        throw new Error("Invalid pageToken.");
-      offset = n;
-    }
-    // Byte-budget the page: even within the row cap, large task notes can push a
-    // response past a host's ~200k-char limit. Shrink the slice until it fits and
-    // advance the offset cursor by exactly what we return, so nothing is dropped.
-    const slice = tasks.slice(offset, offset + limit);
-    const fit = fitToBudget(slice, RESPONSE_CHAR_BUDGET);
-    const pageTasks = fit.items;
-    const nextOffset = offset + pageTasks.length;
-    const nextPageToken =
-      nextOffset < tasks.length
-        ? Buffer.from(String(nextOffset), "utf8").toString("base64url")
-        : undefined;
-    const hasMore = !!nextPageToken;
-    if (hasMore && !fit.fits)
+    // Byte-budget the page via a short offset cursor: even within the row cap,
+    // large task notes can push a response past a host's ~200k-char limit. The
+    // cursor advances by exactly what we return, so nothing is dropped.
+    const page = pageByOffset(tasks, limit, input.pageToken);
+    const pageTasks = page.items;
+    const nextPageToken = page.nextPageToken;
+    const hasMore = page.hasMore;
+    if (hasMore && !page.fits)
       toolWarnings.push(
         "This page was reduced to stay within the host response-size limit (large task notes); more tasks remain - page with pageToken.",
       );

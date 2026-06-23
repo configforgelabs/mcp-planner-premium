@@ -5,10 +5,58 @@ import {
   decodeDataverseText,
   hasStrippableTagContent,
   fitToBudget,
+  pageByOffset,
   type RawTask,
 } from "../src/tools/readHelpers.js";
 
 const NOW = "2026-06-15T00:00:00Z";
+
+describe("pageByOffset", () => {
+  const decode = (t?: string) => (t ? Buffer.from(t, "base64url").toString("utf8") : undefined);
+  const all = Array.from({ length: 5 }, (_, i) => ({ i }));
+
+  it("returns a short numeric-offset cursor (not a long opaque blob) and pages through", () => {
+    const p1 = pageByOffset(all, 2);
+    expect(p1.items).toEqual([{ i: 0 }, { i: 1 }]);
+    expect(p1.hasMore).toBe(true);
+    expect(decode(p1.nextPageToken)).toBe("2"); // cursor is just the next offset
+    expect(p1.nextPageToken!.length).toBeLessThanOrEqual(8); // short enough for a model to echo
+
+    const p2 = pageByOffset(all, 2, p1.nextPageToken);
+    expect(p2.items).toEqual([{ i: 2 }, { i: 3 }]);
+    expect(decode(p2.nextPageToken)).toBe("4");
+
+    const p3 = pageByOffset(all, 2, p2.nextPageToken);
+    expect(p3.items).toEqual([{ i: 4 }]);
+    expect(p3.hasMore).toBe(false);
+    expect(p3.nextPageToken).toBeUndefined();
+  });
+
+  it("yields an empty page with no token when the offset is past the end (stale cursor)", () => {
+    const r = pageByOffset(all, 2, Buffer.from("99", "utf8").toString("base64url"));
+    expect(r.items).toEqual([]);
+    expect(r.hasMore).toBe(false);
+    expect(r.nextPageToken).toBeUndefined();
+  });
+
+  it("shrinks a page to the char budget but still advances the cursor by what it returned", () => {
+    const big = Array.from({ length: 6 }, (_, i) => ({ i, blob: "x".repeat(1000) }));
+    const r = pageByOffset(big, 6, undefined, 3200);
+    expect(r.fits).toBe(false);
+    expect(r.items.length).toBeGreaterThanOrEqual(1);
+    expect(r.items.length).toBeLessThan(6);
+    expect(r.hasMore).toBe(true);
+    // The cursor equals exactly how many rows we returned — no row is skipped.
+    expect(decode(r.nextPageToken)).toBe(String(r.items.length));
+  });
+
+  it("rejects a malformed pageToken", () => {
+    expect(() => pageByOffset(all, 2, "!!!not-base64!!!")).toThrow(/Invalid pageToken/);
+    expect(() => pageByOffset(all, 2, Buffer.from("-1", "utf8").toString("base64url"))).toThrow(
+      /Invalid pageToken/,
+    );
+  });
+});
 
 describe("fitToBudget", () => {
   it("returns everything when under budget", () => {

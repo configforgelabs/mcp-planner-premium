@@ -2,7 +2,7 @@
  * Tests for cursor/offset pagination on the big read tools.
  * - clampLimit / encodePageToken / decodePageToken: pure.
  * - pageOnce: SSRF-safe skiptoken cursor (mocked fetch).
- * - get_plan_tasks_and_buckets: single page vs paginated (two-pass summary scan).
+ * - get_plan_tasks_and_buckets: single page vs paginated via a short offset cursor.
  * - list_plan_tasks: offset cursor caps the returned rows.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -141,28 +141,49 @@ describe("get_plan_tasks_and_buckets pagination", () => {
     expect(r.tasks.find((t: any) => t.taskId === B).isSummary).toBe(false);
   });
 
-  it("paginated: page of full rows + a separate id+parent scan builds the complete summary set", async () => {
+  it("paginated: a short numeric-offset cursor pages the plan; summaryTaskIds stay complete", async () => {
+    // The whole plan (A=parent, B=child) comes back in one scan; the tool slices
+    // it into limit=1 pages addressed by a SHORT offset cursor — not a skiptoken.
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
       const url = String(input);
       if (url.includes("/msdyn_projectbuckets"))
         return jsonRes({ value: [{ msdyn_projectbucketid: "bk", msdyn_name: "B1" }] });
-      // The lightweight summary scan selects only id+parent (no subject).
-      if (!url.includes("msdyn_subject"))
-        return jsonRes({ value: [taskRow(A, null), taskRow(B, A)] });
-      // The full-row page returns A only, with a continuation cursor.
-      return jsonRes({
-        value: [taskRow(A, null)],
-        "@odata.nextLink": BASE + "/msdyn_projecttasks?$skiptoken=" + encodeURIComponent("<c p=2/>"),
-      });
+      return jsonRes({ value: [taskRow(A, null), taskRow(B, A)] }); // no nextLink → full plan
     });
 
-    const r = await withBearer(() => (getPlanContents.handler as any)({ projectId: PROJECT, limit: 1 }));
-    expect(r.ok).toBe(true);
-    expect(r.nextPageToken).toBeDefined();
-    expect(r.taskCount).toBe(1);
-    // Summary set is complete from the scan even though the page had only A.
-    expect(r.summaryTaskIds.map((s: string) => s.toLowerCase())).toContain(A);
-    expect(r.pageLimit).toBe(1);
+    const p1 = await withBearer(() => (getPlanContents.handler as any)({ projectId: PROJECT, limit: 1 }));
+    expect(p1.ok).toBe(true);
+    expect(p1.taskCount).toBe(1);
+    expect(p1.totalTaskCount).toBe(2);
+    expect(p1.tasks[0].taskId).toBe(A);
+    expect(p1.hasMore).toBe(true);
+    expect(p1.pageLimit).toBe(1);
+    // The cursor is just the next offset ("1"), not a long Dataverse skiptoken.
+    expect(Buffer.from(p1.nextPageToken, "base64url").toString("utf8")).toBe("1");
+    // summaryTaskIds is complete from the full scan even though the page had only A.
+    expect(p1.summaryTaskIds.map((s: string) => s.toLowerCase())).toContain(A);
+
+    const p2 = await withBearer(() =>
+      (getPlanContents.handler as any)({ projectId: PROJECT, limit: 1, pageToken: p1.nextPageToken }),
+    );
+    expect(p2.taskCount).toBe(1);
+    expect(p2.tasks[0].taskId).toBe(B);
+    expect(p2.tasks[0].isSummary).toBe(false);
+    expect(p2.hasMore).toBe(false);
+    expect(p2.nextPageToken).toBeUndefined();
+    expect(p2.summaryTaskIds.map((s: string) => s.toLowerCase())).toContain(A);
+  });
+
+  it("rejects a malformed pageToken", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+      const url = String(input);
+      if (url.includes("/msdyn_projectbuckets"))
+        return jsonRes({ value: [{ msdyn_projectbucketid: "bk", msdyn_name: "B1" }] });
+      return jsonRes({ value: [taskRow(A, null)] });
+    });
+    await expect(
+      withBearer(() => (getPlanContents.handler as any)({ projectId: PROJECT, pageToken: "!!!nope!!!" })),
+    ).rejects.toThrow(/Invalid pageToken/);
   });
 });
 
