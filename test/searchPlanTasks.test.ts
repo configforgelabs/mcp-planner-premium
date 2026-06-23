@@ -213,6 +213,37 @@ describe("buildSearchFilter", () => {
     expect(r2.filter).toContain("msdyn_progress le 0.5");
     expect(r2.filter).toContain("msdyn_ismilestone eq true");
   });
+
+  // --- cross-plan (projectId omitted) ---
+  it("omits the plan scope clause when projectId is undefined (cross-plan)", () => {
+    const { filter, scopeFilter } = buildSearchFilter(undefined, "Marcin");
+    expect(filter).not.toContain("_msdyn_project_value");
+    expect(filter).toContain("contains(msdyn_subject,'Marcin')");
+    expect(scopeFilter).toBe(""); // no scope, no structured preds
+  });
+
+  it("cross-plan with a property filter keeps the structured predicate but no scope", () => {
+    const { filter, scopeFilter } = buildSearchFilter(undefined, "Marcin", "description", {
+      finishBefore: "2026-07-01",
+    });
+    expect(filter).not.toContain("_msdyn_project_value");
+    expect(filter).toContain("msdyn_finish lt 2026-07-01T00:00:00.000Z");
+    expect(filter).toContain("contains(msdyn_description,'Marcin')");
+    expect(scopeFilter).toBe("msdyn_finish lt 2026-07-01T00:00:00.000Z");
+    expect(filter.startsWith(" and ")).toBe(false); // no leading/trailing " and "
+    expect(filter.endsWith(" and ")).toBe(false);
+  });
+
+  it("cross-plan filter-only search (no query) emits just the structured predicate", () => {
+    const { filter } = buildSearchFilter(undefined, undefined, "both", {
+      finishBefore: "2026-07-01",
+    });
+    expect(filter).toBe("msdyn_finish lt 2026-07-01T00:00:00.000Z");
+  });
+
+  it("still throws cross-plan when neither query nor filter is given", () => {
+    expect(() => buildSearchFilter(undefined, undefined)).toThrow(/query is required/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -227,6 +258,8 @@ const row = (over: Record<string, unknown> = {}) => ({
   _msdyn_parenttask_value: null,
   msdyn_ismilestone: false,
   msdyn_projectbucket: { msdyn_name: "Bucket A" },
+  _msdyn_project_value: "605685c1-43e9-4c4b-9c85-cc583014ea29",
+  msdyn_project: { msdyn_subject: "IT Planner Board" },
   ...over,
 });
 
@@ -464,5 +497,29 @@ describe("search_plan_tasks handler", () => {
     // msdyn_ismilestone is in $select, so assert no PREDICATE ("… eq").
     expect(urls.some((u) => u.includes("msdyn_ismilestone eq"))).toBe(false);
     expect(urls.some((u) => u.includes("contains(msdyn_description,'Marcin')"))).toBe(true);
+  });
+
+  it("searches across all plans when projectId is omitted, labelling each result's plan", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+      urls.push(String(input));
+      return jsonRes({ value: [row()] });
+    });
+    const r = await call({ query: "Marcin" });
+    expect(r.ok).toBe(true);
+    expect(r.scope).toBe("all-plans");
+    expect(r.projectId).toBeNull();
+    expect(r.tasks[0].projectId).toBe("605685c1-43e9-4c4b-9c85-cc583014ea29");
+    expect(r.tasks[0].projectName).toBe("IT Planner Board");
+    expect(urls.some((u) => u.includes("contains(msdyn_subject,'Marcin')"))).toBe(true);
+    // No plan-scope PREDICATE (the column is still selected/expanded).
+    expect(urls.every((u) => !u.includes("_msdyn_project_value eq"))).toBe(true);
+  });
+
+  it("treats a blank projectId as cross-plan (host can't omit the field)", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonRes({ value: [row()] }));
+    const r = await call({ projectId: "", query: "Marcin" });
+    expect(r.scope).toBe("all-plans");
+    expect(r.projectId).toBeNull();
   });
 });

@@ -37,8 +37,10 @@ interface FullTask extends RawTask {
   msdyn_effort?: number | null;
   _msdyn_projectbucket_value?: string | null;
   _msdyn_projectsprint_value?: string | null;
+  _msdyn_project_value?: string | null;
   msdyn_projectbucket?: { msdyn_name?: string } | null;
   msdyn_parenttask?: { msdyn_subject?: string } | null;
+  msdyn_project?: { msdyn_subject?: string } | null;
   // Extended fields (Project Operations-only; may be absent)
   msdyn_remainingeffort?: number | null;
   msdyn_duration?: number | null;
@@ -121,15 +123,18 @@ function odataDate(value: string, label: string): string {
  * Throws if NEITHER a text query NOR any property filter is supplied (that is just
  * "list every task" — use list_plan_tasks), on limit breaches, on a malformed GUID
  * filter, or on an unparseable date filter. Returns:
- *   - `filter`      plan scope + structured predicates + text (the primary scan)
- *   - `scopeFilter` plan scope + structured predicates, WITHOUT the text predicate
- *                   (the memo-field fallback re-scans with this so bucket/date/etc.
- *                   stay enforced server-side while text is matched client-side)
+ * `projectId` is OPTIONAL: when omitted (or blank) the scope clause is dropped and
+ * the search spans ALL plans the caller can access. Returns:
+ *   - `filter`      [plan scope +] structured predicates + text (the primary scan)
+ *   - `scopeFilter` the same WITHOUT the text predicate (the memo-field fallback
+ *                   re-scans with this so bucket/date/etc. stay enforced
+ *                   server-side while text is matched client-side); "" when there
+ *                   is neither a plan scope nor any structured predicate
  *   - `terms`       the normalised text terms actually searched
  *   - `warnings`    any caveat warnings
  */
 export function buildSearchFilter(
-  projectId: string,
+  projectId: string | undefined,
   query: string | string[] | undefined,
   fields: SearchFields = "both",
   filters: SearchTaskFilters = {},
@@ -218,8 +223,12 @@ export function buildSearchFilter(
         : "(" + subjPred + " or " + descPred + ")";
   };
 
-  // scopeFilter = plan scope + structured predicates, WITHOUT the text match.
-  const scopeFilter = ["_msdyn_project_value eq " + projectId, ...structured].join(" and ");
+  // scopeFilter = [optional plan scope] + structured predicates, WITHOUT the text
+  // match. Omitting projectId drops the scope clause -> the search spans all plans.
+  const scopeParts: string[] = [];
+  if (projectId) scopeParts.push("_msdyn_project_value eq " + projectId);
+  scopeParts.push(...structured);
+  const scopeFilter = scopeParts.join(" and ");
 
   const textPred =
     terms.length === 0
@@ -227,7 +236,8 @@ export function buildSearchFilter(
       : terms.length === 1
         ? predFor(terms[0])
         : "(" + terms.map(predFor).join(" or ") + ")";
-  const filter = textPred ? scopeFilter + " and " + textPred : scopeFilter;
+  // Join only the non-empty parts so we never emit a leading/trailing " and ".
+  const filter = [scopeFilter, textPred].filter(Boolean).join(" and ");
   return { filter, scopeFilter, warnings, terms };
 }
 
@@ -241,11 +251,16 @@ export const searchPlanTasks: ToolDef = {
   name: "search_plan_tasks",
   title: "Search Plan Tasks (text)",
   description:
-    "Server-side TEXT SEARCH within ONE plan: returns only the tasks whose title (msdyn_subject) and/or notes (msdyn_description) CONTAIN the query, by pushing an OData contains() filter to Dataverse. Use THIS to find tasks that mention a word, name, date or phrase (e.g. a person's name in the notes) - do NOT page through get_plan_tasks_and_buckets or list_plan_tasks and grep client-side. Matching is case-insensitive substring. Pass `query` as a single string, OR as an ARRAY of terms to match ANY of them in one call (OR) - prefer this over client-side grep alternation, which is unreliable on some hosts. Searches both title and notes by default; set `fields` to 'subject' or 'description' to narrow. `query` is OPTIONAL when you supply at least one PROPERTY FILTER - all AND-composed with the text match: `bucketId`, `sprintId`, `parentTaskId` (GUIDs - you MUST resolve these to real GUIDs first via get_plan_tasks_and_buckets / list_plan_tasks / get_task; never guess a GUID or pass a display name), `isMilestone` (bool), `priorityMin`/`priorityMax` (int), `progressMin`/`progressMax` (0-1 fraction, 0.5 = 50%), `effortMin`/`effortMax` (hours), and date windows `startAfter`/`startBefore`/`finishAfter`/`finishBefore` (and actuals `actualStartAfter`/`actualStartBefore`/`actualFinishAfter`/`actualFinishBefore`, which need a Project Operations tenant) as ISO-8601 dates. Example - notes containing 'Marcin' in one bucket: query:'Marcin', fields:'description', bucketId:<that bucket's GUID>. If a needed GUID or date is not given to you, CALL THE RIGHT READ TOOL to obtain it before searching rather than guessing. Any optional filter you do NOT want is best omitted, but zero/default values are also tolerated and ignored: a blank string ('') GUID/date, a 0 numeric bound, and isMilestone:false are all treated as 'not set' (so a host that fills every field with its zero/false default does not accidentally over-filter and return nothing). To actually filter, pass a real GUID, a positive numeric bound, or isMilestone:true. Note this tool CANNOT filter by assignee - to find a particular PERSON's tasks use list_user_tasks / list_my_tasks (which key on the assignee), optionally cross-referencing taskIds. Optional `filter` 'all'|'overdue'|'milestones' (as in list_plan_tasks) further narrows the matched rows. Returns the same task shape as list_plan_tasks (taskId, subject, description preview, bucket, dates, progress, …). Size-capped and paged: at most " +
+    "Server-side TEXT SEARCH within ONE plan, or across ALL plans when projectId is omitted: returns only the tasks whose title (msdyn_subject) and/or notes (msdyn_description) CONTAIN the query, by pushing an OData contains() filter to Dataverse. Pass projectId to scope to one plan; OMIT it to search every plan you can access (each task then carries its projectId and projectName - cross-plan scans more rows and is likelier to be truncated). Use THIS to find tasks that mention a word, name, date or phrase (e.g. a person's name in the notes) - do NOT page through get_plan_tasks_and_buckets or list_plan_tasks and grep client-side. Matching is case-insensitive substring. Pass `query` as a single string, OR as an ARRAY of terms to match ANY of them in one call (OR) - prefer this over client-side grep alternation, which is unreliable on some hosts. Searches both title and notes by default; set `fields` to 'subject' or 'description' to narrow. `query` is OPTIONAL when you supply at least one PROPERTY FILTER - all AND-composed with the text match: `bucketId`, `sprintId`, `parentTaskId` (GUIDs - you MUST resolve these to real GUIDs first via get_plan_tasks_and_buckets / list_plan_tasks / get_task; never guess a GUID or pass a display name), `isMilestone` (bool), `priorityMin`/`priorityMax` (int), `progressMin`/`progressMax` (0-1 fraction, 0.5 = 50%), `effortMin`/`effortMax` (hours), and date windows `startAfter`/`startBefore`/`finishAfter`/`finishBefore` (and actuals `actualStartAfter`/`actualStartBefore`/`actualFinishAfter`/`actualFinishBefore`, which need a Project Operations tenant) as ISO-8601 dates. Example - notes containing 'Marcin' in one bucket: query:'Marcin', fields:'description', bucketId:<that bucket's GUID>. If a needed GUID or date is not given to you, CALL THE RIGHT READ TOOL to obtain it before searching rather than guessing. Any optional filter you do NOT want is best omitted, but zero/default values are also tolerated and ignored: a blank string ('') GUID/date, a 0 numeric bound, and isMilestone:false are all treated as 'not set' (so a host that fills every field with its zero/false default does not accidentally over-filter and return nothing). To actually filter, pass a real GUID, a positive numeric bound, or isMilestone:true. Note this tool CANNOT filter by assignee - to find a particular PERSON's tasks use list_user_tasks / list_my_tasks (which key on the assignee), optionally cross-referencing taskIds. Optional `filter` 'all'|'overdue'|'milestones' (as in list_plan_tasks) further narrows the matched rows. Returns the same task shape as list_plan_tasks (taskId, subject, description preview, bucket, dates, progress, …). Size-capped and paged: at most " +
     SAFE_PAGE_SIZE +
     " tasks per page (shrinks further when notes are large) - KEEP PAGING with pageToken until hasMore is false (totalMatched is the full match count). LIMITATION: notes are stored HTML-entity-encoded, so a term containing quotes, ampersands or angle-brackets (\" & ' < >) may not match the human-readable text - search a plain-text fragment instead; the response warns when a term contains such characters. A long note is clipped to a preview (descriptionTruncated:true) - fetch full text via get_task. If truncated=true the underlying 10,000-row scan was incomplete.",
   inputSchema: {
-    projectId: z.string().describe("GUID of the plan (msdyn_projectid) to search within."),
+    projectId: z
+      .string()
+      .optional()
+      .describe(
+        "GUID of the plan (msdyn_projectid) to search within. OMIT it (or pass empty) to search ALL plans you can access; every result then carries its own projectId and projectName. A cross-plan search scans far more rows and is likelier to hit the 10,000-row cap (truncated:true), so prefer a specific query/filter - or pass projectId - when you can.",
+      ),
     query: z
       .union([z.string(), z.array(z.string())])
       .optional()
@@ -365,7 +380,7 @@ export const searchPlanTasks: ToolDef = {
   },
   handler: async (
     input: {
-      projectId: string;
+      projectId?: string;
       query?: string | string[];
       fields?: SearchFields;
       filter?: "all" | "overdue" | "milestones";
@@ -374,7 +389,11 @@ export const searchPlanTasks: ToolDef = {
     } & SearchTaskFilters,
   ) => {
     const BASE = getApiBase();
-    const projectId = assertGuid(input.projectId, "projectId");
+    // projectId is OPTIONAL: blank/omitted -> search every plan (no scope clause).
+    // A blank string is what hosts that cannot omit a field send (see numPred/blank).
+    const rawProjectId = (input.projectId ?? "").trim();
+    const projectId = rawProjectId ? assertGuid(rawProjectId, "projectId") : undefined;
+    const crossPlan = projectId === undefined;
     const fields: SearchFields = input.fields ?? "both";
     const filterMode = input.filter ?? "all";
     const toolWarnings: string[] = [];
@@ -428,16 +447,22 @@ export const searchPlanTasks: ToolDef = {
       "msdyn_projecttaskid,msdyn_subject,msdyn_description," +
       "msdyn_start,msdyn_finish,msdyn_progress,msdyn_effort,msdyn_outlinelevel," +
       "msdyn_ismilestone,msdyn_priority,msdyn_displaysequence," +
-      "_msdyn_projectbucket_value,_msdyn_parenttask_value,_msdyn_projectsprint_value";
+      "_msdyn_projectbucket_value,_msdyn_parenttask_value,_msdyn_projectsprint_value,_msdyn_project_value";
+    // Expand the parent plan so cross-plan results can show which plan each hit is
+    // in (msdyn_project nav prop proven in taskAssignments.ts; name = msdyn_subject).
     const EXPAND =
-      "&$expand=msdyn_projectbucket($select=msdyn_name),msdyn_parenttask($select=msdyn_subject)";
+      "&$expand=msdyn_projectbucket($select=msdyn_name),msdyn_parenttask($select=msdyn_subject)," +
+      "msdyn_project($select=msdyn_subject)";
 
     // Capability-aware full scan for a complete $filter string. Mirrors
     // list_plan_tasks: probe the Project-Operations-only extended fields once
     // (process-cached), then page everything. pageAll throws "read failed (4xx)".
     let hasExtended = getExtendedTaskFieldsCapability() !== "absent";
     const runScan = async (odataFilter: string) => {
-      const filterAndOrder = "&$filter=" + odataFilter + "&$orderby=msdyn_displaysequence asc";
+      // A cross-plan, text-only search can yield an empty filter string; omit the
+      // $filter query option entirely in that case (an empty "&$filter=" is invalid).
+      const filterClause = odataFilter ? "&$filter=" + odataFilter : "";
+      const filterAndOrder = filterClause + "&$orderby=msdyn_displaysequence asc";
       const coreUrl = BASE + "/msdyn_projecttasks?$select=" + CORE_SELECT + EXPAND + filterAndOrder;
       const extUrl =
         BASE +
@@ -500,6 +525,14 @@ export const searchPlanTasks: ToolDef = {
 
     let rows = paged.rows as FullTask[];
 
+    // A cross-plan scan that hit the row cap is genuinely incomplete - say so
+    // loudly (the per-plan path already surfaces truncated, but across all plans
+    // the cap is far easier to hit and the omission is less obvious).
+    if (crossPlan && paged.truncated)
+      toolWarnings.push(
+        "Cross-plan search hit the 10,000-row scan cap - results are INCOMPLETE. Narrow with a more specific query/filter, or pass projectId to scope to one plan.",
+      );
+
     // Client-side match when we fell back to a scope-only scan: keep a row if ANY
     // term appears in the decoded subject/notes (per `fields`).
     if (notesSearchedClientSide) {
@@ -545,6 +578,8 @@ export const searchPlanTasks: ToolDef = {
       return {
         taskId: t.msdyn_projecttaskid,
         subject: t.msdyn_subject,
+        projectId: t._msdyn_project_value ?? null,
+        projectName: t.msdyn_project?.msdyn_subject ?? null,
         description: descTruncated
           ? fullDescription.slice(0, DESCRIPTION_PREVIEW_CHARS)
           : fullDescription,
@@ -590,7 +625,8 @@ export const searchPlanTasks: ToolDef = {
 
     return {
       ok: true,
-      projectId,
+      projectId: projectId ?? null,
+      scope: crossPlan ? "all-plans" : "plan",
       terms: built.terms,
       fields,
       filter: filterMode,
