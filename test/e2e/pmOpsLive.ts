@@ -51,6 +51,13 @@ function info(step: string, tool: string, evidence = ""): void {
 }
 const lc = (s: unknown) => String(s ?? "").toLowerCase();
 const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
+/** Mask a UPN/email so the report never leaks a full identity. */
+const maskUpn = (s: unknown): string => {
+  const v = String(s ?? "");
+  if (!v) return "";
+  const at = v.indexOf("@");
+  return at > 0 ? `${v.slice(0, 2)}…@${v.slice(at + 1)}` : `${v.slice(0, 3)}…`;
+};
 
 async function bootServer(port: number): Promise<Server> {
   process.env.AUTH_MODE = "insecure-passthrough";
@@ -339,14 +346,33 @@ async function main(): Promise<void> {
       const deps = await call("list_dependencies", { projectId });
       check("list_dependencies — dependency links present", "list_dependencies", Date.now() - t, typeof deps.count === "number", `${deps.count} dependency links`);
 
+      // get_plan_tasks_and_buckets is SIZE-CAPPED (≤ SAFE_PAGE_SIZE per page) and no
+      // longer returns the whole tree in one call — page through nextPageToken and
+      // prove the pages reassemble to the full plan (distinct ids == board.taskCount).
       t = Date.now();
-      const contents = await call("get_plan_tasks_and_buckets", { projectId, limit: 1000 });
-      summaryTaskId = (contents.summaryTaskIds ?? [])[0] ?? "";
-      spotTaskId = contents.tasks?.[0]?.taskId ?? "";
-      const maxLevel = Math.max(0, ...(contents.tasks ?? []).map((x: any) => x.outlineLevel ?? 0));
-      check("get_plan_tasks_and_buckets — full task tree returned", "get_plan_tasks_and_buckets", Date.now() - t, (contents.tasks?.length ?? 0) === board.taskCount, `${contents.taskCount} tasks`);
-      check("hierarchy depth (multi-level)", "get_plan_tasks_and_buckets", 0, maxLevel >= 3, `max outline level ${maxLevel}`);
-      check("summary (parent) tasks present", "get_plan_tasks_and_buckets", 0, (contents.summaryTaskIds?.length ?? 0) > 0, `${contents.summaryTaskIds?.length ?? 0} summaries`);
+      {
+        const seenTaskIds = new Set<string>();
+        let maxLevel = 0;
+        let summaryIds: string[] = [];
+        let token: string | undefined;
+        let pages = 0;
+        do {
+          const page: any = await call("get_plan_tasks_and_buckets", { projectId, ...(token ? { pageToken: token } : {}) });
+          for (const x of page.tasks ?? []) {
+            seenTaskIds.add(lc(x.taskId));
+            if (!spotTaskId) spotTaskId = x.taskId;
+            if ((x.outlineLevel ?? 0) > maxLevel) maxLevel = x.outlineLevel ?? 0;
+          }
+          // summaryTaskIds is complete on every page (whole-plan scan while paging).
+          if ((page.summaryTaskIds?.length ?? 0) > summaryIds.length) summaryIds = page.summaryTaskIds ?? [];
+          token = page.nextPageToken;
+          pages++;
+        } while (token && pages < 1000);
+        summaryTaskId = summaryIds[0] ?? "";
+        check("get_plan_tasks_and_buckets — paged read reassembles to all tasks", "get_plan_tasks_and_buckets", Date.now() - t, seenTaskIds.size === board.taskCount, `${seenTaskIds.size} distinct tasks over ${pages} capped page(s) == ${board.taskCount}`);
+        check("hierarchy depth (multi-level)", "get_plan_tasks_and_buckets", 0, maxLevel >= 3, `max outline level ${maxLevel}`);
+        check("summary (parent) tasks present", "get_plan_tasks_and_buckets", 0, summaryIds.length > 0, `${summaryIds.length} summaries`);
+      }
 
       t = Date.now();
       const lpt = await call("list_plan_tasks", { projectId, filter: "all", limit: 1000 });
@@ -356,6 +382,43 @@ async function main(): Promise<void> {
         t = Date.now();
         const task = await call("get_task", { taskId: spotTaskId });
         check("get_task — spot-check one task in full", "get_task", Date.now() - t, task.ok === true && !!task.task?.subject, String(task.task?.subject ?? "").slice(0, 40));
+      }
+    }
+
+    setPhase("Reporting & analytics (at scale, read-only)");
+    {
+      // These three reporting tools (commit 15ac24d) had no live coverage — only
+      // synthetic unit fixtures. Exercise each against the real 642-task /
+      // multi-dependency board, proving they complete without truncation. Each is
+      // independently guarded so one hiccup can't abort the proven phases below.
+      let t = Date.now();
+      try {
+        const cp = await call("get_critical_path", { projectId });
+        check("get_critical_path — critical/near-critical across the dependency network", "get_critical_path", Date.now() - t,
+          cp.ok === true && Array.isArray(cp.criticalPath) && cp.truncated === false,
+          `${cp.criticalCount ?? "?"} critical / ${cp.nearCriticalCount ?? "?"} near-critical · span ${cp.totalDurationDays ?? "?"}d`);
+      } catch (e) {
+        check("get_critical_path — critical/near-critical across the dependency network", "get_critical_path", Date.now() - t, false, e instanceof Error ? e.message.slice(0, 140) : String(e));
+      }
+
+      t = Date.now();
+      try {
+        const sh = await call("get_schedule_health", { projectId });
+        check("get_schedule_health — overdue / at-risk / blocked rollup", "get_schedule_health", Date.now() - t,
+          sh.ok === true && !!sh.counts && sh.truncated === false,
+          `counts ${JSON.stringify(sh.counts).slice(0, 90)}`);
+      } catch (e) {
+        check("get_schedule_health — overdue / at-risk / blocked rollup", "get_schedule_health", Date.now() - t, false, e instanceof Error ? e.message.slice(0, 140) : String(e));
+      }
+
+      t = Date.now();
+      try {
+        const rw = await call("get_resource_workload", { projectId });
+        check("get_resource_workload — per-resource assignment rollup", "get_resource_workload", Date.now() - t,
+          rw.ok === true && Array.isArray(rw.members) && rw.truncated === false,
+          `${rw.memberCount ?? rw.members?.length ?? 0} resource(s) · remainingEffort=${rw.hasRemainingEffort ? "yes" : "n/a"}`);
+      } catch (e) {
+        check("get_resource_workload — per-resource assignment rollup", "get_resource_workload", Date.now() - t, false, e instanceof Error ? e.message.slice(0, 140) : String(e));
       }
     }
 
@@ -496,29 +559,40 @@ async function main(): Promise<void> {
       const member = (team.members ?? team.teamMembers ?? [])[0];
       check("list_team_members (plan auto-includes the creator)", "list_team_members", Date.now() - t, !!member?.name, member?.name ?? "n/a");
 
+      // A single capability tool failing live must NOT abort the run (the
+      // read-safety/pagination phase runs after this) — record it as a fail and
+      // keep going.
       t = Date.now();
-      const sp = await call("add_sprint", { projectId, name: `Sprint-${Date.now().toString().slice(-6)}`, start: "2026-10-01", finish: "2026-10-14" });
-      check("add_sprint creates a sprint", "add_sprint", Date.now() - t, sp?.ok === true || !!sp?.sprintId, sp?.sprintId ? String(sp.sprintId).slice(0, 8) : "created");
+      try {
+        const sp = await call("add_sprint", { projectId, name: `Sprint-${Date.now().toString().slice(-6)}`, start: "2026-10-01", finish: "2026-10-14" });
+        check("add_sprint creates a sprint", "add_sprint", Date.now() - t, sp?.ok === true || !!sp?.sprintId, sp?.sprintId ? String(sp.sprintId).slice(0, 8) : "created");
+      } catch (e) {
+        check("add_sprint creates a sprint", "add_sprint", Date.now() - t, false, e instanceof Error ? e.message.slice(0, 140) : String(e));
+      }
 
       t = Date.now();
-      await inSession(projectId, async (op) => {
-        const r = await call("add_tasks", {
-          operationSetId: op, projectId,
-          tasks: [{
-            ref: "CAP", subject: "Capability check task", bucket: bkA,
-            milestone: true, checklist: ["item A", "item B"], sprint: board!.sprintName,
-            ...(member?.name ? { assignees: [member.name] } : {}),
-            labels: ["ZZ-Nonexistent-Label"],
-          }],
+      try {
+        await inSession(projectId, async (op) => {
+          const r = await call("add_tasks", {
+            operationSetId: op, projectId,
+            tasks: [{
+              ref: "CAP", subject: "Capability check task", bucket: bkA,
+              milestone: true, checklist: ["item A", "item B"], sprint: board!.sprintName,
+              ...(member?.name ? { assignees: [member.name] } : {}),
+              labels: ["ZZ-Nonexistent-Label"],
+            }],
+          });
+          const capId = r.taskRefs?.CAP;
+          if (capId) scratchIds.push(capId);
+          const milestoneDeferred = (r.milestoneTaskIds?.length ?? 0) >= 1;
+          const checklistMade = (r.checklistIds?.length ?? 0) >= 1;
+          const labelWarned = Array.isArray(r.warnings) && r.warnings.some((w: string) => /label/i.test(w));
+          check("checklist + sprint + assignee on one task; milestone deferred; label UI-only warned", "add_tasks", Date.now() - t,
+            milestoneDeferred && checklistMade && labelWarned, `${r.checklistIds?.length ?? 0} checklist items; milestone→milestoneTaskIds; label skipped+warned`);
         });
-        const capId = r.taskRefs?.CAP;
-        if (capId) scratchIds.push(capId);
-        const milestoneDeferred = (r.milestoneTaskIds?.length ?? 0) >= 1;
-        const checklistMade = (r.checklistIds?.length ?? 0) >= 1;
-        const labelWarned = Array.isArray(r.warnings) && r.warnings.some((w: string) => /label/i.test(w));
-        check("checklist + sprint + assignee on one task; milestone deferred; label UI-only warned", "add_tasks", Date.now() - t,
-          milestoneDeferred && checklistMade && labelWarned, `${r.checklistIds?.length ?? 0} checklist items; milestone→milestoneTaskIds; label skipped+warned`);
-      });
+      } catch (e) {
+        check("checklist + sprint + assignee on one task; milestone deferred; label UI-only warned", "add_tasks", Date.now() - t, false, e instanceof Error ? e.message.slice(0, 140) : String(e));
+      }
     }
 
     setPhase("Read safety at scale (cursor / offset pagination)");
@@ -545,6 +619,98 @@ async function main(): Promise<void> {
         total = r.totalMatched; token = r.nextPageToken; pages++;
       } while (token && pages < 1000);
       check("list_plan_tasks offset paging reassembles to totalMatched", "list_plan_tasks", Date.now() - t, seen.size === total, `${seen.size}/${total} over ${pages} pages (limit ${pageLimit})`);
+    }
+
+    setPhase("Member identity & per-user tasks");
+    try {
+      // Member identity (UPN/email), cross-plan search and per-user task reads
+      // (commits a7c4565 / c6e80a2 / 8a83721) were only covered in featureLive's
+      // small synthetic plan — never the canonical 642-board acceptance.
+      let t = Date.now();
+      const team = await call("list_team_members", { projectId });
+      const tm = (team.members ?? team.teamMembers ?? []) as any[];
+      const m = tm.find((x: any) => x?.bookableResourceId) ?? tm[0];
+      const brId: string | undefined = m?.bookableResourceId;
+      check("list_team_members resolves a member identity (UPN/email)", "list_team_members", Date.now() - t,
+        !!m?.name && (!!m?.upn || !!m?.email || !!brId), `${m?.name ?? "n/a"} ${maskUpn(m?.upn ?? m?.email)}`.trim());
+
+      t = Date.now();
+      const who = await call("whoami", {});
+      check("whoami — resolves signed-in user (+ bookable resource)", "whoami", Date.now() - t,
+        !!who.userId, `userId=${String(who.userId ?? "").slice(0, 8)} · resource=${who.bookableResourceId ? "yes" : "none"}`);
+
+      if (m?.name) {
+        t = Date.now();
+        const ftm = await call("find_team_member", { projectId, name: m.name });
+        const hit = (ftm.members ?? [])[0];
+        check("find_team_member — name → member carrying upn/email", "find_team_member", Date.now() - t,
+          ftm.ok === true && !!hit && ("upn" in hit || "email" in hit), `upn=${maskUpn(hit?.upn ?? hit?.email)}`);
+
+        t = Date.now();
+        const xplan = await call("find_team_member_across_plans", { name: m.name });
+        check("find_team_member_across_plans — person found across plans", "find_team_member_across_plans", Date.now() - t,
+          xplan.ok === true && (xplan.people?.length ?? 0) > 0, `${xplan.people?.length ?? 0} person(s) · planCount=${xplan.people?.[0]?.planCount ?? "?"}`);
+      }
+
+      // list_my_tasks accepts both shapes: the paged envelope (count/totalCount/
+      // hasMore) when the signed-in user has assignments, or {count:0,note} when not.
+      t = Date.now();
+      const mine = await call("list_my_tasks", { filter: "all" });
+      check("list_my_tasks — ok + paged envelope or 'no assignments' note", "list_my_tasks", Date.now() - t,
+        mine.ok === true && Array.isArray(mine.tasks) && (typeof mine.totalCount === "number" || typeof mine.note === "string"),
+        mine.note ? `note: ${String(mine.note).slice(0, 44)}` : `count=${mine.count}/${mine.totalCount}`);
+
+      if (brId) {
+        // Seed a deterministic 3-task, one-bucket fixture assigned to this member so
+        // the bucket-filter + pagination checks are non-vacuous. Tracked in scratchIds
+        // → removed with the rest of the scratch subtree during cleanup.
+        const asgBucketId = board!.buckets[bkA];
+        let seededIds: string[] = [];
+        try {
+          await inSession(projectId, async (op) => {
+            const r = await call("add_tasks", { operationSetId: op, projectId,
+              tasks: [0, 1, 2].map((i) => ({ ref: `ASG${i}`, subject: `ASG task ${i}`, bucket: bkA, assignees: [m.name] })) });
+            seededIds = (Object.values(r.taskRefs ?? {}).filter(Boolean) as string[]);
+            for (const id of seededIds) scratchIds.push(id);
+          });
+        } catch { /* tolerant: the contract checks below still run on whatever the member has */ }
+        const assignedOk = seededIds.length === 3;
+
+        t = Date.now();
+        const lut = await call("list_user_tasks", { bookableResourceId: brId, filter: "all" });
+        const total = lut.totalCount ?? lut.count ?? 0;
+        check("list_user_tasks — ok + tasks[] for a specific person", "list_user_tasks", Date.now() - t,
+          lut.ok === true && Array.isArray(lut.tasks), `count=${lut.count}/${total}${lut.note ? ` (${String(lut.note).slice(0, 36)})` : ""}`);
+
+        // (bucket filter) assignee + bucket in ONE call — every returned row is in that bucket.
+        t = Date.now();
+        const inB = await call("list_user_tasks", { bookableResourceId: brId, filter: "all", bucketId: asgBucketId });
+        const allInBucket = (inB.tasks ?? []).every((x: any) => lc(x.bucketId) === lc(asgBucketId));
+        const seededSeen = seededIds.filter((id) => (inB.tasks ?? []).some((x: any) => lc(x.taskId) === lc(id))).length;
+        check("list_user_tasks bucketId filter — assignee + bucket in one call", "list_user_tasks", Date.now() - t,
+          inB.ok === true && inB.bucketId === asgBucketId && allInBucket && (!assignedOk || seededSeen === 3),
+          `${inB.count} task(s) in ${bkA}${assignedOk ? ` · ${seededSeen}/3 seeded visible` : " (seed skipped)"}`);
+
+        // (pagination) offset paging reassembles to totalCount with no gaps/dupes.
+        t = Date.now();
+        if (total > 0) {
+          const perPage = Math.max(1, Math.ceil(total / 3)); // ~3 pages → genuinely multi-page when seeded
+          const seen = new Set<string>(); let token: string | undefined; let envTotal = -1; let pages = 0;
+          do {
+            const r: any = await call("list_user_tasks", { bookableResourceId: brId, filter: "all", limit: perPage, ...(token ? { pageToken: token } : {}) });
+            for (const x of r.tasks ?? []) seen.add(lc(x.taskId));
+            envTotal = r.totalCount; token = r.nextPageToken; pages++;
+          } while (token && pages < 2000);
+          check("list_user_tasks offset paging reassembles to totalCount (no gaps/dupes)", "list_user_tasks", Date.now() - t,
+            seen.size === envTotal, `${seen.size}/${envTotal} over ${pages} page(s) (limit ${perPage})`);
+        } else {
+          info("list_user_tasks paging skipped — member has no assignments to page", "list_user_tasks", m?.name ?? "n/a");
+        }
+      } else {
+        info("per-user task assertions skipped — resolved member has no bookableResourceId", "list_user_tasks", m?.name ?? "n/a");
+      }
+    } catch (e) {
+      check("member identity & per-user tasks — section completed", "—", 0, false, e instanceof Error ? e.message.slice(0, 140) : String(e));
     }
   } catch (e) {
     rows.push({ phase: curPhase || "Run", status: "fail", step: "unexpected exception", tool: "—", latencyMs: 0, evidence: e instanceof Error ? e.message : String(e) });
