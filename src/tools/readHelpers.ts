@@ -185,6 +185,52 @@ export function readHeaders(): Record<string, string> {
 export const MAX_PAGE_SIZE = 1000;
 export const DEFAULT_PAGE_SIZE = 1000;
 
+/**
+ * Size-safe page cap for the big list reads. A host (e.g. Langdock) truncates a
+ * tool response at ~200k characters; even lean task rows reach that around a few
+ * hundred rows, and the cut is SILENT and mid-JSON — the model is then left with
+ * corrupt/partial data it can't tell is incomplete. Capping each page well below
+ * the limit and paging via nextPageToken guarantees every response arrives whole.
+ */
+export const SAFE_PAGE_SIZE = 200;
+
+/**
+ * Char budget for the rows portion of one read response, leaving headroom under
+ * a ~200k host cap for the wrapper fields. Used by fitToBudget to shrink a page
+ * whose rows carry variable-length free text (e.g. task notes) so it still fits.
+ */
+export const RESPONSE_CHAR_BUDGET = 150_000;
+
+/**
+ * Returns the largest leading slice of `items` whose JSON serialization stays
+ * within `maxChars`, plus whether everything fit. Always returns at least one
+ * item (callers bound per-item size separately, so a single item can't blow the
+ * budget). Lets an OFFSET-paged tool keep a page under a host's response-size cap
+ * when item sizes vary, without losing rows — the caller advances its cursor by
+ * the returned items.length, so the dropped rows come back on the next page.
+ */
+export function fitToBudget<T>(
+  items: T[],
+  maxChars = RESPONSE_CHAR_BUDGET,
+): { items: T[]; fits: boolean } {
+  if (items.length === 0 || JSON.stringify(items).length <= maxChars)
+    return { items, fits: true };
+  // Largest prefix that fits (binary search on length; always keeps ≥ 1).
+  let lo = 1;
+  let hi = items.length;
+  let best = 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (JSON.stringify(items.slice(0, mid)).length <= maxChars) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return { items: items.slice(0, best), fits: false };
+}
+
 /** Clamp a caller-supplied limit into [1, MAX_PAGE_SIZE]; undefined -> default. */
 export function clampLimit(limit: unknown): number {
   if (limit === undefined || limit === null) return DEFAULT_PAGE_SIZE;

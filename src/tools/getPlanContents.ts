@@ -1,14 +1,7 @@
 import { z } from "zod";
 import { getApiBase } from "../config.js";
 import { assertGuid, isGuid } from "../dataverse.js";
-import {
-  pageAll,
-  readHeaders,
-  pageOnce,
-  clampLimit,
-  DEFAULT_PAGE_SIZE,
-  MAX_PAGE_SIZE,
-} from "./readHelpers.js";
+import { pageAll, readHeaders, pageOnce, clampLimit, SAFE_PAGE_SIZE } from "./readHelpers.js";
 import type { ToolDef } from "./types.js";
 
 /** A task is a summary if some other task names it as its parent. */
@@ -29,11 +22,11 @@ export const getPlanContents: ToolDef = {
   name: "get_plan_tasks_and_buckets",
   title: "Get Plan Tasks & Buckets",
   description:
-    "Returns a plan's buckets and a PAGE of its tasks (ordered as displayed): id, name, dates, progress, effort, outline level, bucket, plus parentTaskId, isMilestone and isSummary flags, and summaryTaskIds (the ids of all summary/parent tasks, complete even across pages). Bounded for large plans: returns up to `limit` tasks (default " +
-    DEFAULT_PAGE_SIZE +
-    ", max " +
-    MAX_PAGE_SIZE +
-    ") and a `nextPageToken` when more remain — pass it back as `pageToken` to get the next page. A plan with ≤ limit tasks returns everything in one page (no token). On very large plans use a smaller `limit` (e.g. 100-200) and/or `bucketId` to keep the response within the model's context budget; or use get_plan_summary / get_bucket_breakdown for counts only. Summary task dates, effort and progress are ROLLED UP from children and MUST NOT be written to - pass summaryTaskIds to update_tasks / update_tasks_batch (or just pass projectId to update_tasks, which auto-protects them). The returned task/plan 'progress' is a 0-1 fraction (0.5 = 50%). If truncated=true an internal scan hit the 10,000-row cap and summaryTaskIds may be incomplete.",
+    "Returns a plan's buckets and a PAGE of its tasks (ordered as displayed): id, name, dates, progress, effort, outline level, bucket, plus parentTaskId, isMilestone and isSummary flags, and summaryTaskIds (the ids of all summary/parent tasks, complete even across pages). Size-capped for large plans: returns at most " +
+    SAFE_PAGE_SIZE +
+    " tasks per page (each response is kept under hosts' ~200k-char limit so it is NEVER silently truncated) and sets hasMore:true + a `nextPageToken` when more remain — pass the token back as `pageToken` and KEEP PAGING until hasMore is false before treating the plan as complete. A plan with ≤ " +
+    SAFE_PAGE_SIZE +
+    " tasks returns everything in one page (no token). Use `bucketId` to narrow to one bucket, or get_plan_summary / get_bucket_breakdown for counts only. Summary task dates, effort and progress are ROLLED UP from children and MUST NOT be written to - pass summaryTaskIds to update_tasks / update_tasks_batch (or just pass projectId to update_tasks, which auto-protects them). The returned task/plan 'progress' is a 0-1 fraction (0.5 = 50%). If truncated=true an internal scan hit the 10,000-row cap and summaryTaskIds may be incomplete.",
   inputSchema: {
     projectId: z.string().describe("GUID of the plan (msdyn_projectid)."),
     bucketId: z
@@ -48,11 +41,9 @@ export const getPlanContents: ToolDef = {
       .positive()
       .optional()
       .describe(
-        "Max tasks to return in this page (default " +
-          DEFAULT_PAGE_SIZE +
-          ", max " +
-          MAX_PAGE_SIZE +
-          "). Use a smaller value (e.g. 100-200) on large plans to bound the response size; page through with pageToken.",
+        "Max tasks to return in this page (default and max " +
+          SAFE_PAGE_SIZE +
+          "; larger values are capped to keep the response under the host size limit). Page through with pageToken until hasMore is false.",
       ),
     pageToken: z
       .string()
@@ -72,7 +63,9 @@ export const getPlanContents: ToolDef = {
     const projectId = assertGuid(input.projectId, "projectId");
     const bucketFilter = (input.bucketId || "").trim();
     if (bucketFilter && !isGuid(bucketFilter)) throw new Error("bucketId must be a GUID.");
-    const limit = clampLimit(input.limit);
+    // Cap by a size-safe row count so the response stays under a host's ~200k
+    // char limit even if the caller asks for more; page through with pageToken.
+    const limit = Math.min(clampLimit(input.limit), SAFE_PAGE_SIZE);
     const pageToken = input.pageToken;
 
     // Buckets rarely paginate (one small internal scan).
@@ -142,12 +135,22 @@ export const getPlanContents: ToolDef = {
     // complete across pages (built from the page or the full id+parent scan).
     const summaryTaskIds = [...summarySet];
 
+    const hasMore = !!page.nextPageToken;
     return {
       ok: true,
       projectId: projectId,
       truncated: bucketsPaged.truncated || summaryScanTruncated,
       pageLimit: limit,
+      hasMore: hasMore,
       nextPageToken: page.nextPageToken,
+      ...(hasMore
+        ? {
+            note:
+              "Incomplete: this is one page of the plan's tasks (taskCount=" +
+              tasks.length +
+              "). Call get_plan_tasks_and_buckets again with this pageToken and keep paging until hasMore is false before treating the task list as complete.",
+          }
+        : {}),
       buckets: bucketsPaged.rows.map((b: any) => ({
         bucketId: b.msdyn_projectbucketid,
         name: b.msdyn_name,

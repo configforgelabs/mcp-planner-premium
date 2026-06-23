@@ -7,10 +7,18 @@ import {
   nowIso,
   decodeDataverseText,
   clampLimit,
-  DEFAULT_PAGE_SIZE,
-  MAX_PAGE_SIZE,
+  SAFE_PAGE_SIZE,
+  RESPONSE_CHAR_BUDGET,
+  fitToBudget,
   type RawTask,
 } from "./readHelpers.js";
+
+/**
+ * Per-row clip for a task's description in this LIST view: one giant note must
+ * not blow the page budget on its own. The full text is always available via
+ * get_task; a clipped row carries descriptionTruncated:true.
+ */
+const DESCRIPTION_PREVIEW_CHARS = 20_000;
 import {
   getExtendedTaskFieldsCapability,
   setExtendedTaskFieldsCapability,
@@ -44,11 +52,9 @@ export const listPlanTasks: ToolDef = {
   name: "list_plan_tasks",
   title: "List Plan Tasks (filtered)",
   description:
-    "Lists a plan's tasks filtered by 'all', 'overdue' or 'milestones', optionally scoped to one bucket. 'overdue' = leaf tasks past their finish date and under 100% (summary/parent tasks are excluded - their dates roll up from children). Returns up to `limit` tasks (default " +
-    DEFAULT_PAGE_SIZE +
-    ", max " +
-    MAX_PAGE_SIZE +
-    ") with a `nextPageToken` when more match - page through with pageToken to read them all without overloading context (totalMatched is the full match count). For efficient bulk paging of every task prefer get_plan_tasks_and_buckets. If truncated=true the underlying scan hit the 10,000-row cap and the list is incomplete.",
+    "Lists a plan's tasks WITH descriptions, filtered by 'all', 'overdue' or 'milestones', optionally scoped to one bucket. 'overdue' = leaf tasks past their finish date and under 100% (summary/parent tasks are excluded - their dates roll up from children). Size-capped: returns at most " +
+    SAFE_PAGE_SIZE +
+    " tasks per page AND shrinks the page further when notes are large, so each response stays under hosts' ~200k-char limit and is NEVER silently truncated; sets hasMore:true + a `nextPageToken` when more match — KEEP PAGING with pageToken until hasMore is false (totalMatched is the full match count). A very long description is clipped to a preview with descriptionTruncated:true — fetch the full text via get_task. For lean bulk paging of every task (no descriptions) prefer get_plan_tasks_and_buckets. If truncated=true the underlying scan hit the 10,000-row cap and the list is incomplete.",
   inputSchema: {
     projectId: z.string().describe("GUID of the plan (msdyn_projectid)."),
     filter: z
@@ -64,11 +70,9 @@ export const listPlanTasks: ToolDef = {
       .positive()
       .optional()
       .describe(
-        "Max tasks to return in this page (default " +
-          DEFAULT_PAGE_SIZE +
-          ", max " +
-          MAX_PAGE_SIZE +
-          "). Page with pageToken.",
+        "Max tasks to return in this page (default and max " +
+          SAFE_PAGE_SIZE +
+          "; larger values are capped, and the page may shrink further if notes are large). Page with pageToken until hasMore is false.",
       ),
     pageToken: z
       .string()
@@ -183,10 +187,17 @@ export const listPlanTasks: ToolDef = {
       );
     }
 
-    const tasks = filtered.map((t) => ({
+    const tasks = filtered.map((t) => {
+      const fullDescription = decodeDataverseText(t.msdyn_description);
+      const descTruncated =
+        typeof fullDescription === "string" && fullDescription.length > DESCRIPTION_PREVIEW_CHARS;
+      return {
       taskId: t.msdyn_projecttaskid,
       subject: t.msdyn_subject,
-      description: decodeDataverseText(t.msdyn_description),
+      description: descTruncated
+        ? fullDescription.slice(0, DESCRIPTION_PREVIEW_CHARS)
+        : fullDescription,
+      ...(descTruncated ? { descriptionTruncated: true } : {}),
       start: t.msdyn_start ?? null,
       finish: t.msdyn_finish ?? null,
       progressPercent:
@@ -209,13 +220,14 @@ export const listPlanTasks: ToolDef = {
         actualStart: t.msdyn_actualstart ?? null,
         actualFinish: t.msdyn_actualfinish ?? null,
       }),
-    }));
+      };
+    });
 
     // Bound the response to `limit` rows with an offset cursor. The internal scan
     // already read every matching row (needed for the overdue/summary logic); this
     // only caps what is RETURNED so the payload stays within the model's context
     // budget. pageToken is a private numeric offset, never a URL — SSRF-irrelevant.
-    const limit = clampLimit(input.limit);
+    const limit = Math.min(clampLimit(input.limit), SAFE_PAGE_SIZE);
     let offset = 0;
     if (input.pageToken) {
       const raw = Buffer.from(input.pageToken, "base64url").toString("utf8");
@@ -224,12 +236,22 @@ export const listPlanTasks: ToolDef = {
         throw new Error("Invalid pageToken.");
       offset = n;
     }
-    const pageTasks = tasks.slice(offset, offset + limit);
-    const nextOffset = offset + limit;
+    // Byte-budget the page: even within the row cap, large task notes can push a
+    // response past a host's ~200k-char limit. Shrink the slice until it fits and
+    // advance the offset cursor by exactly what we return, so nothing is dropped.
+    const slice = tasks.slice(offset, offset + limit);
+    const fit = fitToBudget(slice, RESPONSE_CHAR_BUDGET);
+    const pageTasks = fit.items;
+    const nextOffset = offset + pageTasks.length;
     const nextPageToken =
       nextOffset < tasks.length
         ? Buffer.from(String(nextOffset), "utf8").toString("base64url")
         : undefined;
+    const hasMore = !!nextPageToken;
+    if (hasMore && !fit.fits)
+      toolWarnings.push(
+        "This page was reduced to stay within the host response-size limit (large task notes); more tasks remain - page with pageToken.",
+      );
 
     return {
       ok: true,
@@ -238,7 +260,18 @@ export const listPlanTasks: ToolDef = {
       count: pageTasks.length,
       totalMatched: tasks.length,
       pageLimit: limit,
+      hasMore,
       nextPageToken,
+      ...(hasMore
+        ? {
+            note:
+              "Incomplete: returned " +
+              pageTasks.length +
+              " of " +
+              tasks.length +
+              " matching tasks. Call list_plan_tasks again with this pageToken (same projectId/filter) and keep paging until hasMore is false before claiming you have them all.",
+          }
+        : {}),
       truncated: paged.truncated,
       warnings: toolWarnings,
       tasks: pageTasks,

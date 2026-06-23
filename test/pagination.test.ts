@@ -210,3 +210,67 @@ describe("list_plan_tasks offset cursor", () => {
     ).rejects.toThrow(/Invalid pageToken/);
   });
 });
+
+describe("response size safety (host 200k-char cap)", () => {
+  it("get_plan_tasks_and_buckets caps the page at SAFE_PAGE_SIZE even if more is requested", async () => {
+    // Server would honour a big maxpagesize, but the tool must clamp it to 200.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+      const url = String(input);
+      if (url.includes("/msdyn_projectbuckets"))
+        return jsonRes({ value: [{ msdyn_projectbucketid: "bk", msdyn_name: "B1" }] });
+      return jsonRes({
+        value: [{ msdyn_projecttaskid: "t1-0000-0000-0000-000000000001", msdyn_subject: "T1", _msdyn_parenttask_value: null }],
+      });
+    });
+    const r = await withBearer(() =>
+      (getPlanContents.handler as any)({ projectId: PROJECT, limit: 1000 }),
+    );
+    expect(r.pageLimit).toBe(200); // clamped down from the requested 1000
+    expect(r.hasMore).toBe(false);
+  });
+
+  it("list_plan_tasks shrinks a page with huge notes to stay under the char budget", async () => {
+    // 12 tasks, each with an ~18k-char note (under the 20k per-row preview clip) →
+    // a full 12-task page (~216k) exceeds the 150k budget, so the tool returns
+    // fewer with a continuation token + warning.
+    const big = "N".repeat(18_000);
+    const rows = Array.from({ length: 12 }, (_, i) => ({
+      msdyn_projecttaskid: `task${i}-0000-0000-0000-00000000000${i}`,
+      msdyn_subject: "Task " + i,
+      msdyn_description: big,
+      msdyn_finish: "2026-07-01T00:00:00Z",
+      msdyn_progress: 0,
+      _msdyn_parenttask_value: null,
+      msdyn_ismilestone: false,
+    }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => jsonRes({ value: rows }));
+    const r = await withBearer(() => (listPlanTasks.handler as any)({ projectId: PROJECT, filter: "all" }));
+    expect(r.totalMatched).toBe(12);
+    expect(r.count).toBeLessThan(12); // page was shrunk to fit the budget
+    expect(r.count).toBeGreaterThanOrEqual(1);
+    expect(r.hasMore).toBe(true);
+    expect(r.nextPageToken).toBeDefined();
+    expect(JSON.stringify(r.tasks).length).toBeLessThanOrEqual(150_000);
+    expect(r.warnings.some((w: string) => /response-size limit/i.test(w))).toBe(true);
+  });
+
+  it("list_plan_tasks clips a single oversized description to a preview", async () => {
+    const huge = "D".repeat(25_000); // over the 20k per-row preview cap
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      jsonRes({
+        value: [{
+          msdyn_projecttaskid: "task0-0000-0000-0000-000000000000",
+          msdyn_subject: "Solo",
+          msdyn_description: huge,
+          msdyn_finish: "2026-07-01T00:00:00Z",
+          msdyn_progress: 0,
+          _msdyn_parenttask_value: null,
+          msdyn_ismilestone: false,
+        }] }),
+    );
+    const r = await withBearer(() => (listPlanTasks.handler as any)({ projectId: PROJECT, filter: "all" }));
+    expect(r.count).toBe(1);
+    expect(r.tasks[0].description).toHaveLength(20_000);
+    expect(r.tasks[0].descriptionTruncated).toBe(true);
+  });
+});

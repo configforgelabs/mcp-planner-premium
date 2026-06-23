@@ -29,6 +29,7 @@ const SERVER_INSTRUCTIONS = [
   "7. msdyn_progress and actuals are rejected on create - set them in a follow-up update_tasks_batch session. msdyn_ismilestone is engine-managed: PSS rejects it on create AND on update (and auto-sets it on summary tasks), so it cannot be set via the API - point the user to the Planner UI for milestones. Dependencies cannot be updated - delete and recreate.",
   "8. delete_tasks_batch requires confirmed=true only after explicit per-record user confirmation. Whole-plan deletion is blocked - point the user to the Planner UI.",
   "9. After a write, treat get_plan_tasks_and_buckets as authoritative; if it returns truncated=true the read is incomplete - do not report success from it.",
+  "10. Reads are PAGED and size-capped (each response is kept under hosts' ~200k-char limit so it is never silently truncated). A response with hasMore:true / a nextPageToken is INCOMPLETE - call the SAME tool again with that pageToken and keep paging until hasMore is false before counting tasks, summarising, or claiming you have the whole plan. A clipped note shows descriptionTruncated:true - fetch the full text with get_task.",
   "Schema note: a plan's end date is msdyn_finish (not msdyn_scheduledend). Progress fields are 0-1 (0.5 = 50%); effort is in hours.",
   "Date range note: PSS clamps task dates to the plan's own start/finish range. Before adding tasks with explicit dates, set the plan's start/finish (via update on msdyn_project) to cover the full intended task date range — otherwise PSS silently normalises all task dates to the plan's current range.",
   "Description note: Dataverse sanitises task descriptions. Standard special characters round-trip (the read tools decode &quot;/&amp;/&lt;/&gt; back to \" & < > to match the Planner UI), but tag-like angle-bracket content (e.g. <2 weeks>) is STRIPPED before storage and cannot be recovered — do not rely on literal <...> text surviving in a description.",
@@ -80,21 +81,17 @@ export function buildServer(): McpServer {
         }
 
         const result = await tool.handler(args as any);
-        const out: {
-          content: { type: "text"; text: string }[];
-          structuredContent?: Record<string, unknown>;
-        } = {
-          // Compact JSON - no pretty-print indentation (pure token waste for an
-          // LLM consumer).
+        // Send the payload ONCE, as content[].text (compact JSON - no pretty
+        // indentation, pure token waste for an LLM). MCP also offers a
+        // `structuredContent` channel, but it carries the SAME data — doubling the
+        // bytes a host counts toward its response-size cap (e.g. Langdock truncates
+        // at ~200k chars). The model and this project's clients read content[].text,
+        // and no tool declares an outputSchema, so structuredContent only added a
+        // redundant copy; dropping it ~halves every response. (Trade-off: a host's
+        // typed-output panel falls back to showing the raw JSON text.)
+        return {
           content: [{ type: "text" as const, text: JSON.stringify(result) }],
         };
-        // Provide structured output too when the result is a plain object, so
-        // hosts can consume typed fields (projectId, operationSetId, taskRefs…)
-        // without re-parsing the text.
-        if (result && typeof result === "object" && !Array.isArray(result)) {
-          out.structuredContent = result as Record<string, unknown>;
-        }
-        return out;
       },
     );
   }

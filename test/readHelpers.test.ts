@@ -4,10 +4,42 @@ import {
   linkTypeLabel,
   decodeDataverseText,
   hasStrippableTagContent,
+  fitToBudget,
   type RawTask,
 } from "../src/tools/readHelpers.js";
 
 const NOW = "2026-06-15T00:00:00Z";
+
+describe("fitToBudget", () => {
+  it("returns everything when under budget", () => {
+    const items = [{ a: 1 }, { a: 2 }, { a: 3 }];
+    const r = fitToBudget(items, 10_000);
+    expect(r.fits).toBe(true);
+    expect(r.items).toHaveLength(3);
+  });
+
+  it("returns the largest leading slice that fits, with fits=false", () => {
+    const items = Array.from({ length: 10 }, (_, i) => ({ i, blob: "x".repeat(1000) }));
+    const r = fitToBudget(items, 3200);
+    expect(r.fits).toBe(false);
+    expect(r.items.length).toBeGreaterThanOrEqual(1);
+    expect(r.items.length).toBeLessThan(10);
+    expect(JSON.stringify(r.items).length).toBeLessThanOrEqual(3200);
+    // One more item would have pushed it over budget.
+    expect(JSON.stringify(items.slice(0, r.items.length + 1)).length).toBeGreaterThan(3200);
+  });
+
+  it("always returns at least one item even if it alone exceeds the budget", () => {
+    const items = [{ huge: "x".repeat(5000) }, { b: 2 }];
+    const r = fitToBudget(items, 100);
+    expect(r.items).toHaveLength(1);
+    expect(r.fits).toBe(false);
+  });
+
+  it("handles an empty list", () => {
+    expect(fitToBudget([], 100)).toEqual({ items: [], fits: true });
+  });
+});
 
 describe("linkTypeLabel", () => {
   it("maps standard 192350000-range values to FS/SS/FF/SF", () => {
