@@ -90,12 +90,69 @@ function attrRow(overrides: Record<string, unknown>) {
   };
 }
 
-describe("validateCustomColumnKeys — off by default (no-op, no network)", () => {
-  it("does nothing when CUSTOM_COLUMNS_MODE=off (default)", async () => {
+describe("validateCustomColumnKeys — off is the opt-out kill switch (no-op, no network)", () => {
+  it("does nothing when CUSTOM_COLUMNS_MODE=off", async () => {
+    setEnv({ CUSTOM_COLUMNS_MODE: "off" });
     await expect(
       validateCustomColumnKeys([task({ new_riskscore: 7 })], "create"),
     ).resolves.toBeUndefined();
     expect(dvReqMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("validateCustomColumnKeys — on-demand by default (no env var set)", () => {
+  it("makes NO metadata fetch for a standard-only batch (zero-cost)", async () => {
+    // default mode is 'metadata', but the batch carries only msdyn_ keys, so the
+    // per-entity `custom.length === 0` guard means no metadata is ever fetched.
+    await expect(validateCustomColumnKeys([task()], "create")).resolves.toBeUndefined();
+    expect(dvReqMock).not.toHaveBeenCalled();
+  });
+
+  it("validates a custom key by default, with no CUSTOM_COLUMNS_MODE set", async () => {
+    dvReqMock.mockImplementation((req: { url: string }) => {
+      if (ATTRIBUTES_URL_RE.test(req.url)) {
+        return jsonOk({
+          value: [
+            attrRow({
+              LogicalName: "new_riskscore",
+              AttributeType: "Integer",
+              AttributeTypeName: { Value: "IntegerType" },
+            }),
+          ],
+        });
+      }
+      return jsonOk({ value: [] });
+    });
+    await expect(
+      validateCustomColumnKeys([task({ new_riskscore: 7 })], "create"),
+    ).resolves.toBeUndefined();
+    expect(dvReqMock).toHaveBeenCalled(); // on-demand activation without any env flag
+  });
+
+  it("rejects a custom key not on the allowlist in metadata+allowlist mode", async () => {
+    setEnv({
+      CUSTOM_COLUMNS_MODE: "metadata+allowlist",
+      CUSTOM_COLUMNS_ALLOWLIST: "new_other",
+    });
+    dvReqMock.mockImplementation((req: { url: string }) => {
+      if (ATTRIBUTES_URL_RE.test(req.url)) {
+        return jsonOk({
+          value: [
+            attrRow({
+              LogicalName: "new_riskscore",
+              AttributeType: "Integer",
+              AttributeTypeName: { Value: "IntegerType" },
+            }),
+          ],
+        });
+      }
+      return jsonOk({ value: [] });
+    });
+    // new_riskscore exists in metadata but is NOT on the allowlist -> filtered out
+    // by applyAllowlist -> rejected (allowlist enforced on the raw-batch write path too).
+    await expect(
+      validateCustomColumnKeys([task({ new_riskscore: 7 })], "create"),
+    ).rejects.toThrow(/not a known custom column/);
   });
 });
 

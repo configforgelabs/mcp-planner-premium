@@ -192,7 +192,7 @@ export const updateTasks: ToolDef = {
         '[{"@odata.type": "Microsoft.Dynamics.CRM.msdyn_projecttask", "msdyn_projecttaskid": "<guid>"}]',
     });
     validateUpdateEntities(entities, input.summaryTaskIds);
-    // Additional, opt-in (CUSTOM_COLUMNS_MODE!=off) metadata-backed check for
+    // Additional on-demand (runs unless CUSTOM_COLUMNS_MODE=off) metadata-backed check for
     // any custom (non-msdyn_) key — see customColumnsGuard.ts. Runs AFTER the
     // synchronous guardrails above, so the dependency-block / summary-task /
     // 200-cap checks always fire first, unchanged.

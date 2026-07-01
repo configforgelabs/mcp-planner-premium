@@ -13,10 +13,10 @@
  * or cryptically later.
  *
  * This turns a silent/cryptic PSS failure into a clear one — a net guardrail
- * strengthening per CLAUDE.md golden rule #1. It is gated behind
- * CUSTOM_COLUMNS_MODE (default "off") so it is entirely opt-in: with the
- * feature off, this module is never invoked and raw-batch behaviour is
- * byte-for-byte unchanged from before this pass.
+ * strengthening per CLAUDE.md golden rule #1. It runs on-demand (whenever a raw
+ * entity carries a non-msdyn_ key) and no-ops entirely when the operator set
+ * CUSTOM_COLUMNS_MODE=off (opt-out) or when a batch has only standard msdyn_
+ * keys — so batches that never touch custom columns are byte-for-byte unchanged.
  *
  * IMPORTANT: this check runs AFTER (in addition to, never instead of) the
  * existing synchronous validateAddEntities/validateUpdateEntities — so the
@@ -28,6 +28,7 @@
 import { getCustomColumnsMode } from "../config.js";
 import { getEntityMetadata, isCustomColumnName } from "../dataverse/metadata.js";
 import { toWrite as columnToWrite, type ColumnMeta } from "../dataverse/columnTypes.js";
+import { applyAllowlist } from "./customColumnsRead.js";
 
 /** @odata.type suffix -> the Dataverse entity logical name custom-column
  * metadata is looked up against. Only entities that carry genuine custom
@@ -79,10 +80,11 @@ export async function validateCustomColumnKeys(
   if (getCustomColumnsMode() === "off") return;
   if (!Array.isArray(entities)) return;
 
-  // Cache metadata per entity logical name across the batch (avoid refetching
-  // per row — getEntityMetadata is itself process-lifetime cached too, but
-  // this keeps the loop below simple and avoids repeat cache-map lookups).
-  const metaByEntity = new Map<string, Awaited<ReturnType<typeof getEntityMetadata>>>();
+  // Cache the (allowlist-filtered) column map per entity logical name across the
+  // batch (avoid refetching per row — getEntityMetadata is itself process-lifetime
+  // cached too, but this keeps the loop below simple). applyAllowlist enforces
+  // CUSTOM_COLUMNS_ALLOWLIST symmetrically with the read / ergonomic-write paths.
+  const colsByEntity = new Map<string, Map<string, ColumnMeta>>();
   const navIndexByEntity = new Map<string, Map<string, ColumnMeta>>();
 
   for (let i = 0; i < entities.length; i++) {
@@ -109,10 +111,11 @@ export async function validateCustomColumnKeys(
       );
     }
 
-    let meta = metaByEntity.get(entityLogicalName);
-    if (!meta) {
-      meta = await getEntityMetadata(entityLogicalName);
-      metaByEntity.set(entityLogicalName, meta);
+    let cols = colsByEntity.get(entityLogicalName);
+    if (!cols) {
+      const meta = await getEntityMetadata(entityLogicalName);
+      cols = applyAllowlist(meta.columns);
+      colsByEntity.set(entityLogicalName, cols);
     }
     // Index lookup/customer/owner columns by their resolved navigation-property
     // name (case-sensitive — that casing IS the trap this guard exists to
@@ -121,7 +124,7 @@ export async function validateCustomColumnKeys(
     let navIndex = navIndexByEntity.get(entityLogicalName);
     if (!navIndex) {
       navIndex = new Map();
-      for (const c of meta.columns.values()) {
+      for (const c of cols.values()) {
         if (c.navigationProperty) navIndex.set(c.navigationProperty, c);
       }
       navIndexByEntity.set(entityLogicalName, navIndex);
@@ -137,7 +140,7 @@ export async function validateCustomColumnKeys(
         const byNav = navIndex.get(base);
         if (byNav) continue; // correct nav key — nothing further to check here.
 
-        const byLogicalName = meta.columns.get(base);
+        const byLogicalName = cols.get(base);
         if (!byLogicalName) {
           throw new Error(
             "entities[" +
@@ -193,7 +196,7 @@ export async function validateCustomColumnKeys(
       // enforces isComputed / isValidForCreate/Update / supported-type / value
       // shape. We only care that it throws on a bad column; the returned
       // fragment is discarded (the raw caller's own value is sent as-is to PSS).
-      const col = meta.columns.get(base);
+      const col = cols.get(base);
       if (!col) {
         throw new Error(
           "entities[" +

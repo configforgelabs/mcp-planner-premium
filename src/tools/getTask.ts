@@ -28,7 +28,7 @@ export const getTask: ToolDef = {
   name: "get_task",
   title: "Get Task",
   description:
-    "Returns full detail for one task by GUID: dates (scheduled + actual), effort, remaining effort, duration, % complete, milestone flag, isSummary flag, outline level, display sequence, bucket (id + name), parent (id + subject), sprint id, priority, description, plus predecessor/successor dependency links, resource assignments (with member name), and checklist items (id + title + completed - use these ids to adjust/remove items via update_tasks). Dependency, assignment and checklist data may be omitted (with a warning) on environments where those columns differ - the core task fields always return. Optional includeCustomColumns (true, or an array of logical names) adds customer-added Dataverse columns as task.customFields - discover them first with list_custom_columns; requires CUSTOM_COLUMNS_MODE!=off on the server.",
+    "Returns full detail for one task by GUID: dates (scheduled + actual), effort, remaining effort, duration, % complete, milestone flag, isSummary flag, outline level, display sequence, bucket (id + name), parent (id + subject), sprint id, priority, description, plus predecessor/successor dependency links, resource assignments (with member name), and checklist items (id + title + completed - use these ids to adjust/remove items via update_tasks). Dependency, assignment and checklist data may be omitted (with a warning) on environments where those columns differ - the core task fields always return. Optional includeCustomColumns (true, or an array of logical names) adds customer-added Dataverse columns as task.customFields - discover them first with list_custom_columns (on-demand by default; ignored only if the operator disabled custom columns with CUSTOM_COLUMNS_MODE=off).",
   inputSchema: {
     taskId: z.string().describe("GUID of the task (msdyn_projecttaskid)."),
     includeCustomColumns: includeCustomColumnsSchema,
@@ -50,8 +50,8 @@ export const getTask: ToolDef = {
     const EXPAND =
       "&$expand=msdyn_projectbucket($select=msdyn_name),msdyn_parenttask($select=msdyn_subject)";
 
-    // Custom-column selection (additive; no-op unless CUSTOM_COLUMNS_MODE!=off
-    // AND includeCustomColumns was passed). Resolved once up-front so its
+    // Custom-column selection (additive; no-op unless includeCustomColumns was
+    // passed, regardless of mode). Resolved once up-front so its
     // warnings/select tokens/header can be reused across the retry paths below.
     const customSelection = await resolveCustomColumnsForRead(
       "msdyn_projecttask",

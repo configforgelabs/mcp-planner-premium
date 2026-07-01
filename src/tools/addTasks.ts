@@ -304,7 +304,7 @@ export const addTasks: ToolDef = {
         '[{"@odata.type": "Microsoft.Dynamics.CRM.msdyn_projecttask", "msdyn_subject": "..."}]',
     });
     validateAddEntities(entities);
-    // Additional, opt-in (CUSTOM_COLUMNS_MODE!=off) metadata-backed check for
+    // Additional on-demand (runs unless CUSTOM_COLUMNS_MODE=off) metadata-backed check for
     // any custom (non-msdyn_) key — see customColumnsGuard.ts. Runs AFTER the
     // synchronous guardrails above, so the allow-list / blocked-on-create /
     // bind-alias / 200-cap checks always fire first, unchanged.

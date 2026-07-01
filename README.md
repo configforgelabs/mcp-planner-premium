@@ -172,13 +172,20 @@ The other 9 tools already take plain scalars, so they need no wrapper.
 
 Customers on full Project Plan 3/5 licenses often add **custom columns**
 (publisher-prefixed, e.g. `new_riskscore`, `contoso_category`) to the plan
-(`msdyn_project`) or task (`msdyn_projecttask`) entity. This server can read
-and write them, entirely **opt-in** and off by default:
+(`msdyn_project`) or task (`msdyn_projecttask`) entity. This server reads and
+writes them **on-demand, with no configuration** — nothing happens until a
+caller actually references a custom column:
 
-- Set `CUSTOM_COLUMNS_MODE=metadata` (or `metadata+allowlist`, see
-  [Configuration](#configuration)) to turn the feature on. With the default
-  `off`, `customFields`/`includeCustomColumns` are ignored and every existing
-  tool signature and output is byte-for-byte unchanged.
+- **On by default, activated on use.** The feature only does work (a live
+  metadata read) when a request references a custom column — `customFields` on a
+  write, `includeCustomColumns` on a read, or a non-`msdyn_` key in a raw batch.
+  A request that touches no custom column is byte-for-byte unchanged with zero
+  added cost. To **disable** it entirely (locked-down tenants), set the opt-out
+  `CUSTOM_COLUMNS_MODE=off`; to restrict *which* custom columns are usable, use
+  `metadata+allowlist` with `CUSTOM_COLUMNS_ALLOWLIST` (enforced on read AND
+  write). See [Configuration](#configuration).
+- *Custom columns are unrelated to checklists, labels, buckets, or any standard
+  `msdyn_` field — those are handled by the normal tool parameters.*
 - **Discover first.** Call `list_custom_columns` (`entity: "project"` or
   `"task"`) to see what's actually on your tenant — logical name, normalized
   type, whether it's writable, option-set labels, lookup targets. Use
@@ -210,7 +217,7 @@ and write them, entirely **opt-in** and off by default:
   rejected with a specific, actionable error — never a silent drop or partial
   write.
 - The raw `add_tasks_batch`/`update_tasks_batch` tools get the same protection:
-  when `CUSTOM_COLUMNS_MODE!=off`, any non-`msdyn_` key in a raw entity is
+  unless disabled, any non-`msdyn_` key in a raw entity is
   validated against metadata (writable, not computed, correct nav-property
   bind key for lookups) and rejected with a teachable error instead of being
   passed through to PSS unchecked — a strengthening of the existing allow-list,
@@ -238,8 +245,8 @@ container loudly instead of failing per-request).
 | `READ_ONLY_MODE` | no | `false` | When `true`, exposes only the read-only tools (`readOnlyHint:true` in `src/tools/index.ts`, including `list_custom_columns`/`describe_columns`) and hard-rejects any write/session tool call. Useful for a reporting-only deployment. Accepts `true/1/yes/on` (case-insensitive); invalid values crash at boot. |
 | `ENABLED_TOOLS` | no | — | Comma-separated allowlist of exact tool names. When set, only those tools are exposed. Unknown names crash at boot (fail-closed). |
 | `TOOLSETS` | no | — | Comma-separated list of named tool groups to expose: `reporting` (list views), `discovery` (lookup/identity), `sessions` (change-session lifecycle), `write` (structural writes), `analytics` (schedule and resource insights — overlaps `reporting`). Union of all selected groups is taken. Unknown group names crash at boot (fail-closed). All three controls are AND-ed: a tool must pass READ_ONLY_MODE, ENABLED_TOOLS, and TOOLSETS to be registered. |
-| `CUSTOM_COLUMNS_MODE` | no | `off` | `off` = custom-column read/discovery/write disabled entirely (default, zero behaviour change). `metadata` = any non-`msdyn_` column discoverable via live Dataverse metadata is eligible for `customFields`/`includeCustomColumns`. `metadata+allowlist` = metadata-eligible AND present in `CUSTOM_COLUMNS_ALLOWLIST`. See [Custom Dataverse columns](#custom-dataverse-columns). |
-| `CUSTOM_COLUMNS_ALLOWLIST` | no | — | Comma list of custom-column logical names, used only when `CUSTOM_COLUMNS_MODE=metadata+allowlist`, to further restrict which discovered columns are actually usable. |
+| `CUSTOM_COLUMNS_MODE` | no | `metadata` | `metadata` (default) = **on-demand**: any non-`msdyn_` column discoverable via live Dataverse metadata is eligible for `customFields`/`includeCustomColumns`, but nothing runs unless a caller references one (zero cost otherwise). `off` = opt-out kill switch, custom-column read/discovery/write disabled entirely. `metadata+allowlist` = metadata-eligible AND present in `CUSTOM_COLUMNS_ALLOWLIST`. See [Custom Dataverse columns](#custom-dataverse-columns). |
+| `CUSTOM_COLUMNS_ALLOWLIST` | no | — | Comma list of custom-column logical names, used only when `CUSTOM_COLUMNS_MODE=metadata+allowlist`, to further restrict which discovered columns are actually usable — enforced on both read and write. |
 | `CUSTOM_COLUMNS_METADATA_TTL_MS` | no | (none — cached for process lifetime) | Optional TTL for the custom-column metadata cache. Schema is normally stable within a deployment (same rationale as the capability cache); set this only if you're actively iterating on custom-column schema on a live server. |
 
 **Deployment hardening note:** combine `READ_ONLY_MODE=true` (or `TOOLSETS=reporting,discovery,analytics`) with

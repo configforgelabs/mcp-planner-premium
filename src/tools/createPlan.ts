@@ -3,6 +3,7 @@ import { getApiBase, getCustomColumnsMode } from "../config.js";
 import { dvReq, dvHeaders, dvErrorMessage } from "../dataverse.js";
 import { getEntityMetadata } from "../dataverse/metadata.js";
 import { spliceCustomFields, type ResolveCustomColumn } from "./addTasksSimple.js";
+import { applyAllowlist } from "./customColumnsRead.js";
 import type { ToolDef } from "./types.js";
 
 // Create Premium Plan - msdyn_CreateProjectV1 (runs immediately, creates default bucket)
@@ -25,7 +26,7 @@ export const createPlan: ToolDef = {
       .record(z.unknown())
       .optional()
       .describe(
-        "Custom (non-msdyn_) Dataverse column values on the new plan, keyed by logical name. Requires CUSTOM_COLUMNS_MODE!=off on the server. UNVERIFIED-LIVE: msdyn_CreateProjectV1 may reject custom columns even when metadata says they're valid for create (this server has no tenant with real custom columns to prove it against) - if create fails because of a customFields value, retry without customFields and set them afterwards via update_tasks_batch (@odata.type Microsoft.Dynamics.CRM.msdyn_project) instead.",
+        "Custom (non-msdyn_) Dataverse column values on the new plan, keyed by logical name. On-demand by default (disabled only if the operator set CUSTOM_COLUMNS_MODE=off). UNVERIFIED-LIVE: msdyn_CreateProjectV1 may reject custom columns even when metadata says they're valid for create (this server has no tenant with real custom columns to prove it against) - if create fails because of a customFields value, retry without customFields and set them afterwards via update_tasks_batch (@odata.type Microsoft.Dynamics.CRM.msdyn_project) instead.",
       ),
   },
   handler: async (input: {
@@ -46,15 +47,17 @@ export const createPlan: ToolDef = {
     if (input.description) project.msdyn_description = input.description;
     if (input.scheduledStart) project.msdyn_scheduledstart = input.scheduledStart;
 
-    // Custom (non-msdyn_) columns — see the UNVERIFIED-LIVE caveat above.
+    // Custom (non-msdyn_) columns — see the UNVERIFIED-LIVE caveat above. On-demand:
+    // only runs when the caller passes customFields. CUSTOM_COLUMNS_MODE=off is an opt-out.
     if (input.customFields && Object.keys(input.customFields).length > 0) {
       if (getCustomColumnsMode() === "off")
         throw new Error(
-          "customFields was provided but CUSTOM_COLUMNS_MODE is 'off' on this server. Ask the server operator to set CUSTOM_COLUMNS_MODE=metadata (or metadata+allowlist), or remove customFields.",
+          "customFields was provided but custom columns are disabled on this server (CUSTOM_COLUMNS_MODE=off). Remove the opt-out, or remove customFields.",
         );
       const entityMeta = await getEntityMetadata("msdyn_project");
+      const cols = applyAllowlist(entityMeta.columns);
       const resolveCustomColumn: ResolveCustomColumn = (logicalName: string) =>
-        entityMeta.columns.get(logicalName);
+        cols.get(logicalName);
       spliceCustomFields(project, input.customFields, "create", resolveCustomColumn, "plan");
     }
 

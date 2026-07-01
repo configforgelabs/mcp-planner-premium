@@ -99,7 +99,7 @@ function picklistCol(logicalName: string): ColumnMeta {
   };
 }
 
-describe("resolveCustomColumnsForRead — default-off behaviour", () => {
+describe("resolveCustomColumnsForRead — no-op / disabled behaviour", () => {
   it("returns an empty, no-op selection when include is undefined (zero behaviour change)", async () => {
     setEnv({ CUSTOM_COLUMNS_MODE: "metadata" });
     const sel = await resolveCustomColumnsForRead("msdyn_projecttask", undefined);
@@ -146,6 +146,18 @@ describe("resolveCustomColumnsForRead — include:true", () => {
     });
     const sel = await resolveCustomColumnsForRead("msdyn_projecttask", true);
     expect(sel.needsWidenedPrefer).toBe(false);
+  });
+
+  it("activates on the default mode with no CUSTOM_COLUMNS_MODE set (on-demand)", async () => {
+    setEnv(); // no env var -> default 'metadata' (on-demand)
+    getEntityMetadataMock.mockResolvedValue({
+      entity: "msdyn_projecttask",
+      columns: new Map([["new_riskscore", scalarCol("new_riskscore", "int")]]),
+      fetchedAt: Date.now(),
+    });
+    const sel = await resolveCustomColumnsForRead("msdyn_projecttask", true);
+    expect(sel.columns.size).toBe(1);
+    expect(getEntityMetadataMock).toHaveBeenCalled();
   });
 });
 

@@ -12,6 +12,7 @@ import {
 import { validateAddEntities } from "./addTasks.js";
 import { hasStrippableTagContent } from "./readHelpers.js";
 import { getEntityMetadata } from "../dataverse/metadata.js";
+import { applyAllowlist } from "./customColumnsRead.js";
 import { toWrite as columnToWrite, type ColumnMeta } from "../dataverse/columnTypes.js";
 import { checklistCreateEntity, CHECKLIST_ORDER_STEP } from "./checklist.js";
 import type { ToolDef } from "./types.js";
@@ -73,8 +74,8 @@ export interface SimpleTask {
    * project team) or a teamMemberId GUID. The person must already be on the
    * project team — an unknown assignee is skipped with a warning. */
   assignees?: string[];
-  /** Custom (non-msdyn_) column values, keyed by logical name. Requires
-   * CUSTOM_COLUMNS_MODE!=off on the server. Resolved via metadata + the
+  /** Custom (non-msdyn_) column values, keyed by logical name. On-demand by
+   * default (disabled only via CUSTOM_COLUMNS_MODE=off). Resolved via metadata + the
    * columnTypes.ts codec — label-friendly (picklist label or value; lookup
    * {target,id} or a bare guid when single-target). Rejects any msdyn_* key. */
   customFields?: Record<string, unknown>;
@@ -110,7 +111,7 @@ export function spliceCustomFields(
   if (!resolveCustomColumn)
     throw new Error(
       contextLabel +
-        ": customFields were provided but custom-column resolution is unavailable (CUSTOM_COLUMNS_MODE is 'off', or the server could not be reached). Set CUSTOM_COLUMNS_MODE=metadata, or remove customFields.",
+        ": customFields were provided but custom columns are disabled on this server (CUSTOM_COLUMNS_MODE=off) or the metadata could not be read. Remove the opt-out, or remove customFields.",
     );
   for (const key of keys) {
     if (/^msdyn_/i.test(key))
@@ -518,7 +519,7 @@ const taskSchema = z.object({
     .record(z.unknown())
     .optional()
     .describe(
-      "Custom (non-msdyn_) Dataverse column values, keyed by logical name, e.g. {\"new_riskscore\": 7, \"new_category\": \"High\"}. Requires CUSTOM_COLUMNS_MODE!=off on the server. Picklist accepts a label or an integer value; lookups accept a bare GUID (when the column has a single target) or {target,id}. Use list_custom_columns / describe_columns to discover valid names and types first. Standard msdyn_ fields are rejected here — use this tool's named parameters for those.",
+      "Custom (non-msdyn_) Dataverse column values, keyed by logical name, e.g. {\"new_riskscore\": 7, \"new_category\": \"High\"}. On-demand by default (disabled only if the operator set CUSTOM_COLUMNS_MODE=off). Picklist accepts a label or an integer value; lookups accept a bare GUID (when the column has a single target) or {target,id}. Use list_custom_columns / describe_columns to discover valid names and types first. Standard msdyn_ fields are rejected here — use this tool's named parameters for those.",
     ),
 });
 
@@ -725,19 +726,19 @@ export const addTasksSimple: ToolDef = {
       return teamByName[a.toLowerCase()] ?? null;
     };
 
-    // Custom (non-msdyn_) columns: fetch metadata for msdyn_projecttask ONLY if
-    // any task actually uses customFields, and only when the feature is enabled
-    // (CUSTOM_COLUMNS_MODE!=off) — keeps the default path byte-for-byte
-    // unchanged and avoids an unnecessary metadata round-trip otherwise.
+    // Custom (non-msdyn_) columns: on-demand — fetch metadata for msdyn_projecttask
+    // ONLY if a task actually uses customFields (so the default path stays byte-for-byte
+    // unchanged with zero metadata round-trips). CUSTOM_COLUMNS_MODE=off is an opt-out.
     const wantsCustomFields = tasks.some((t) => t.customFields && Object.keys(t.customFields).length > 0);
     let resolveCustomColumn: ResolveCustomColumn | undefined;
     if (wantsCustomFields) {
       if (getCustomColumnsMode() === "off")
         throw new Error(
-          "customFields was provided but CUSTOM_COLUMNS_MODE is 'off' on this server. Ask the server operator to set CUSTOM_COLUMNS_MODE=metadata (or metadata+allowlist), or remove customFields.",
+          "customFields was provided but custom columns are disabled on this server (CUSTOM_COLUMNS_MODE=off). Remove the opt-out, or remove customFields.",
         );
       const entityMeta = await getEntityMetadata("msdyn_projecttask");
-      resolveCustomColumn = (logicalName: string) => entityMeta.columns.get(logicalName);
+      const cols = applyAllowlist(entityMeta.columns);
+      resolveCustomColumn = (logicalName: string) => cols.get(logicalName);
     }
 
     const linkTypeValues =

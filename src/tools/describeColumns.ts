@@ -30,7 +30,7 @@ export const describeColumns: ToolDef = {
   name: "describe_columns",
   title: "Describe Columns",
   description:
-    "Returns deep detail for named customer-added Dataverse columns on the plan (project) or task entity: normalized type, create/update validity, computed flag, option-set values+labels (picklist/multiselect), date format, and lookup navigation-property/target-entity/entity-set info. A superset of describe_option_set for the custom-column case (describe_option_set still works for standard fields). Read-only. Requires CUSTOM_COLUMNS_MODE!=off on the server.",
+    "Returns deep detail for named customer-added Dataverse columns on the plan (project) or task entity: normalized type, create/update validity, computed flag, option-set values+labels (picklist/multiselect), date format, and lookup navigation-property/target-entity/entity-set info. A superset of describe_option_set for the custom-column case (describe_option_set still works for standard fields). Read-only. On-demand by default; returns ok:false only if the operator disabled custom columns (CUSTOM_COLUMNS_MODE=off).",
   inputSchema: {
     entity: z.enum(["project", "task"]).describe("Which entity to inspect: 'project' (a plan) or 'task'."),
     columns: z
@@ -43,7 +43,7 @@ export const describeColumns: ToolDef = {
     if (mode === "off") {
       return {
         ok: false,
-        note: "CUSTOM_COLUMNS_MODE is 'off' on this server - custom-column discovery is disabled. Ask the server operator to set CUSTOM_COLUMNS_MODE=metadata (or metadata+allowlist).",
+        note: "Custom columns are disabled on this server (CUSTOM_COLUMNS_MODE=off, the opt-out). Ask the operator to remove the opt-out to use them.",
         columns: [],
       };
     }

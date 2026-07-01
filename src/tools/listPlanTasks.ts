@@ -58,7 +58,7 @@ export const listPlanTasks: ToolDef = {
   description:
     "Lists a plan's tasks WITH descriptions, filtered by 'all', 'overdue' or 'milestones', optionally scoped to one bucket. 'overdue' = leaf tasks past their finish date and under 100% (summary/parent tasks are excluded - their dates roll up from children). Size-capped: returns at most " +
     SAFE_PAGE_SIZE +
-    " tasks per page AND shrinks the page further when notes are large, so each response stays under hosts' ~200k-char limit and is NEVER silently truncated; sets hasMore:true + a `nextPageToken` when more match — KEEP PAGING with pageToken until hasMore is false (totalMatched is the full match count). A very long description is clipped to a preview with descriptionTruncated:true — fetch the full text via get_task. For lean bulk paging of every task (no descriptions) prefer get_plan_tasks_and_buckets. To find only the tasks whose title or notes CONTAIN a given word, name or phrase, use search_plan_tasks instead of paging this list and grepping. If truncated=true the underlying scan hit the 10,000-row cap and the list is incomplete. Optional includeCustomColumns (true, or an array of logical names) adds customer-added Dataverse columns as customFields per task - discover them first with list_custom_columns; requires CUSTOM_COLUMNS_MODE!=off on the server.",
+    " tasks per page AND shrinks the page further when notes are large, so each response stays under hosts' ~200k-char limit and is NEVER silently truncated; sets hasMore:true + a `nextPageToken` when more match — KEEP PAGING with pageToken until hasMore is false (totalMatched is the full match count). A very long description is clipped to a preview with descriptionTruncated:true — fetch the full text via get_task. For lean bulk paging of every task (no descriptions) prefer get_plan_tasks_and_buckets. To find only the tasks whose title or notes CONTAIN a given word, name or phrase, use search_plan_tasks instead of paging this list and grepping. If truncated=true the underlying scan hit the 10,000-row cap and the list is incomplete. Optional includeCustomColumns (true, or an array of logical names) adds customer-added Dataverse columns as customFields per task - discover them first with list_custom_columns (on-demand by default; ignored only if the operator disabled custom columns with CUSTOM_COLUMNS_MODE=off).",
   inputSchema: {
     projectId: z.string().describe("GUID of the plan (msdyn_projectid)."),
     filter: z
@@ -111,8 +111,8 @@ export const listPlanTasks: ToolDef = {
       "&$expand=msdyn_projectbucket($select=msdyn_name),msdyn_parenttask($select=msdyn_subject)";
     const filterAndOrder = "&$filter=" + odata + "&$orderby=msdyn_displaysequence asc";
 
-    // Custom-column selection (additive; no-op unless CUSTOM_COLUMNS_MODE!=off
-    // AND includeCustomColumns was passed).
+    // Custom-column selection (additive; no-op unless includeCustomColumns was
+    // passed, regardless of mode).
     let customSelection = await resolveCustomColumnsForRead(
       "msdyn_projecttask",
       input.includeCustomColumns,

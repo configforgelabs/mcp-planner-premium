@@ -15,6 +15,7 @@ import { validateDeleteRecords, buildDeleteEntities } from "./deleteTasks.js";
 import { hasStrippableTagContent } from "./readHelpers.js";
 import { getEntityMetadata } from "../dataverse/metadata.js";
 import { spliceCustomFields, type ResolveCustomColumn } from "./addTasksSimple.js";
+import { applyAllowlist } from "./customColumnsRead.js";
 import {
   checklistCreateEntity,
   checklistUpdateEntity,
@@ -52,8 +53,8 @@ export interface SimpleTaskUpdate {
    * Removing a task from a sprint (null sprint) is not supported — PSS rejects
    * null lookup binds; pass null to get a warning and no change. */
   sprint?: string;
-  /** Custom (non-msdyn_) column values, keyed by logical name. Requires
-   * CUSTOM_COLUMNS_MODE!=off on the server. See addTasksSimple.ts's SimpleTask
+  /** Custom (non-msdyn_) column values, keyed by logical name. On-demand by
+   * default (disabled only via CUSTOM_COLUMNS_MODE=off). See addTasksSimple.ts's SimpleTask
    * for the exact resolution/codec behaviour (shared via spliceCustomFields). */
   customFields?: Record<string, unknown>;
   /** Checklist add / adjust / remove ops for this existing task. Add = string or
@@ -309,7 +310,7 @@ const updateSchema = z.object({
     .record(z.unknown())
     .optional()
     .describe(
-      "Custom (non-msdyn_) Dataverse column values, keyed by logical name, e.g. {\"new_riskscore\": 9}. Requires CUSTOM_COLUMNS_MODE!=off on the server. Picklist accepts a label or an integer value; lookups accept a bare GUID (when the column has a single target) or {target,id}. Use list_custom_columns / describe_columns to discover valid names and types first. Standard msdyn_ fields are rejected here — use this tool's named parameters for those.",
+      "Custom (non-msdyn_) Dataverse column values, keyed by logical name, e.g. {\"new_riskscore\": 9}. On-demand by default (disabled only if the operator set CUSTOM_COLUMNS_MODE=off). Picklist accepts a label or an integer value; lookups accept a bare GUID (when the column has a single target) or {target,id}. Use list_custom_columns / describe_columns to discover valid names and types first. Standard msdyn_ fields are rejected here — use this tool's named parameters for those.",
     ),
   checklist: z
     .array(checklistOpSchema)
@@ -474,19 +475,19 @@ export const updateTasksSimple: ToolDef = {
       });
     }
 
-    // Custom (non-msdyn_) columns: fetch metadata for msdyn_projecttask ONLY if
-    // any task actually uses customFields, and only when the feature is enabled
-    // (CUSTOM_COLUMNS_MODE!=off) — keeps the default path byte-for-byte
-    // unchanged and avoids an unnecessary metadata round-trip otherwise.
+    // Custom (non-msdyn_) columns: on-demand — fetch metadata for msdyn_projecttask
+    // ONLY if a task actually uses customFields (default path unchanged, zero metadata
+    // round-trips). CUSTOM_COLUMNS_MODE=off is an opt-out.
     const wantsCustomFields = tasks.some((t) => t.customFields && Object.keys(t.customFields).length > 0);
     let resolveCustomColumn: ResolveCustomColumn | undefined;
     if (wantsCustomFields) {
       if (getCustomColumnsMode() === "off")
         throw new Error(
-          "customFields was provided but CUSTOM_COLUMNS_MODE is 'off' on this server. Ask the server operator to set CUSTOM_COLUMNS_MODE=metadata (or metadata+allowlist), or remove customFields.",
+          "customFields was provided but custom columns are disabled on this server (CUSTOM_COLUMNS_MODE=off). Remove the opt-out, or remove customFields.",
         );
       const entityMeta = await getEntityMetadata("msdyn_projecttask");
-      resolveCustomColumn = (logicalName: string) => entityMeta.columns.get(logicalName);
+      const cols = applyAllowlist(entityMeta.columns);
+      resolveCustomColumn = (logicalName: string) => cols.get(logicalName);
     }
 
     const { entities, warnings } = buildUpdateEntities(tasks, resolvedBucketIds, resolvedSprintIds, resolveCustomColumn);

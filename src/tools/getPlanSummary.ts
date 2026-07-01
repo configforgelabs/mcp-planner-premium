@@ -16,7 +16,7 @@ export const getPlanSummary: ToolDef = {
   name: "get_plan_summary",
   title: "Get Plan Summary",
   description:
-    "Returns a reporting rollup for one plan: name, dates, % complete, effort (total/completed/remaining), and task counts (total, leaf, summary, milestones, overdue-leaf). Overdue counts LEAF tasks only (summary tasks roll up from children). progressPercent is 0-100. On environments without msdyn_effortremaining, effortRemainingHours is returned null with a note in warnings[]. NOTE: for verifying a write you just made, prefer an independent read path - this is for reporting/exploration. If truncated=true the task scan was incomplete. Optional includeCustomColumns (true, or an array of logical names) adds customer-added Dataverse columns on the PLAN as customFields - discover them first with list_custom_columns; requires CUSTOM_COLUMNS_MODE!=off on the server.",
+    "Returns a reporting rollup for one plan: name, dates, % complete, effort (total/completed/remaining), and task counts (total, leaf, summary, milestones, overdue-leaf). Overdue counts LEAF tasks only (summary tasks roll up from children). progressPercent is 0-100. On environments without msdyn_effortremaining, effortRemainingHours is returned null with a note in warnings[]. NOTE: for verifying a write you just made, prefer an independent read path - this is for reporting/exploration. If truncated=true the task scan was incomplete. Optional includeCustomColumns (true, or an array of logical names) adds customer-added Dataverse columns on the PLAN as customFields - discover them first with list_custom_columns (on-demand by default; ignored only if the operator disabled custom columns with CUSTOM_COLUMNS_MODE=off).",
   inputSchema: {
     projectId: z.string().describe("GUID of the plan (msdyn_projectid)."),
     includeCustomColumns: includeCustomColumnsSchema,
@@ -26,8 +26,8 @@ export const getPlanSummary: ToolDef = {
     const projectId = assertGuid(input.projectId, "projectId");
     const warnings: string[] = [];
 
-    // Custom-column selection (additive; no-op unless CUSTOM_COLUMNS_MODE!=off
-    // AND includeCustomColumns was passed).
+    // Custom-column selection (additive; no-op unless includeCustomColumns was
+    // passed, regardless of mode).
     let customSelection = await resolveCustomColumnsForRead(
       "msdyn_project",
       input.includeCustomColumns,

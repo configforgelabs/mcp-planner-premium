@@ -40,7 +40,7 @@ export const listCustomColumns: ToolDef = {
   name: "list_custom_columns",
   title: "List Custom Columns",
   description:
-    "Discovers customer-added Dataverse columns (logical name does NOT start with msdyn_) on the plan (project) or task entity, via live metadata - so you learn the real schema instead of guessing field names. Returns { logicalName, schemaName, type, writable, readOnlyReason?, options?, lookupTargets? } per column. Read-only. Requires CUSTOM_COLUMNS_MODE!=off on the server (returns ok:false with an explanatory note when off). Use before passing includeCustomColumns to get_task/list_plan_tasks/get_plan_summary, or before writing custom fields.",
+    "Discovers customer-added Dataverse columns (logical name does NOT start with msdyn_) on the plan (project) or task entity, via live metadata - so you learn the real schema instead of guessing field names. Returns { logicalName, schemaName, type, writable, readOnlyReason?, options?, lookupTargets? } per column. Read-only. On-demand by default; returns ok:false with a note only if the operator disabled custom columns (CUSTOM_COLUMNS_MODE=off). Use before passing includeCustomColumns to get_task/list_plan_tasks/get_plan_summary, or before writing custom fields.",
   inputSchema: {
     entity: z.enum(["project", "task"]).describe("Which entity to inspect: 'project' (a plan) or 'task'."),
   },
@@ -49,7 +49,7 @@ export const listCustomColumns: ToolDef = {
     if (mode === "off") {
       return {
         ok: false,
-        note: "CUSTOM_COLUMNS_MODE is 'off' on this server - custom-column discovery is disabled. Ask the server operator to set CUSTOM_COLUMNS_MODE=metadata (or metadata+allowlist).",
+        note: "Custom columns are disabled on this server (CUSTOM_COLUMNS_MODE=off, the opt-out). Ask the operator to remove the opt-out to use them.",
         columns: [],
       };
     }

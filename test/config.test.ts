@@ -166,8 +166,13 @@ describe("getToolsets", () => {
 });
 
 describe("CUSTOM_COLUMNS_MODE", () => {
-  it("defaults to 'off' when unset", () => {
+  it("defaults to 'metadata' (on-demand) when unset", () => {
     setEnv();
+    expect(getCustomColumnsMode()).toBe("metadata");
+  });
+
+  it("accepts 'off' as the opt-out kill switch", () => {
+    setEnv({ CUSTOM_COLUMNS_MODE: "off" });
     expect(getCustomColumnsMode()).toBe("off");
   });
 

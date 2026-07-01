@@ -27,8 +27,8 @@ export const includeCustomColumnsSchema = z
   .optional()
   .describe(
     "Optional. true = include ALL readable custom (non-msdyn_) columns; or pass an array of " +
-      "specific logical names. Requires CUSTOM_COLUMNS_MODE!=off on the server (default off — " +
-      "ignored otherwise). Use list_custom_columns first to discover what's available.",
+      "specific logical names. On-demand by default; ignored only if the operator disabled " +
+      "custom columns (CUSTOM_COLUMNS_MODE=off). Use list_custom_columns first to discover what's available.",
   );
 
 export interface CustomColumnsSelection {
@@ -48,7 +48,13 @@ const EMPTY_SELECTION: CustomColumnsSelection = {
   warnings: [],
 };
 
-function applyAllowlist(columns: Map<string, ColumnMeta>): Map<string, ColumnMeta> {
+/**
+ * Filters a column map by CUSTOM_COLUMNS_ALLOWLIST when mode is
+ * "metadata+allowlist"; otherwise returns it unchanged. Shared policy used by
+ * the read path, the ergonomic write handlers, and the raw-batch guard so
+ * "metadata+allowlist" means the same restriction on read AND write.
+ */
+export function applyAllowlist(columns: Map<string, ColumnMeta>): Map<string, ColumnMeta> {
   const mode = getCustomColumnsMode();
   if (mode !== "metadata+allowlist") return columns;
   const allow = new Set(getCustomColumnsAllowlist() ?? []);
@@ -73,7 +79,7 @@ export async function resolveCustomColumnsForRead(
     return {
       ...EMPTY_SELECTION,
       warnings: [
-        "includeCustomColumns was requested but CUSTOM_COLUMNS_MODE=off on this server — ignored.",
+        "includeCustomColumns was requested but custom columns are disabled on this server (CUSTOM_COLUMNS_MODE=off) — ignored.",
       ],
     };
   }

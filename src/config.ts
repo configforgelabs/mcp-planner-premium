@@ -102,12 +102,17 @@ const EnvSchema = z
     // Known groups: reporting, discovery, sessions, write, analytics.
     TOOLSETS: z.string().optional(),
 
-    // --- Custom Dataverse column support (opt-in; default off = zero behaviour change) ---
+    // --- Custom Dataverse column support (on-demand by default) ---
 
-    // "off" (default)            - custom-column read/discovery is disabled entirely.
-    // "metadata"                 - any non-msdyn_ column discoverable via metadata is eligible.
+    // "metadata" (default)       - on-demand: any non-msdyn_ column discoverable via
+    //                              metadata is eligible. Nothing happens (no metadata
+    //                              read, no behaviour change) unless a caller actually
+    //                              references a custom column (customFields / a raw
+    //                              non-msdyn_ key on write, includeCustomColumns on read).
+    // "off"                      - opt-out kill switch: custom-column read/discovery/write
+    //                              is disabled entirely, for locked-down tenants.
     // "metadata+allowlist"       - metadata-eligible AND present in CUSTOM_COLUMNS_ALLOWLIST.
-    CUSTOM_COLUMNS_MODE: z.enum(["off", "metadata", "metadata+allowlist"]).default("off"),
+    CUSTOM_COLUMNS_MODE: z.enum(["off", "metadata", "metadata+allowlist"]).default("metadata"),
 
     // Comma list of logical names further restricting which custom columns are
     // usable, when CUSTOM_COLUMNS_MODE=metadata+allowlist.
@@ -214,7 +219,7 @@ export function getToolsets(): string[] | undefined {
   return splitList(getEnv().TOOLSETS);
 }
 
-/** Returns the configured custom-columns mode. Default "off". */
+/** Returns the configured custom-columns mode. Default "metadata" (on-demand). */
 export function getCustomColumnsMode(): "off" | "metadata" | "metadata+allowlist" {
   return getEnv().CUSTOM_COLUMNS_MODE;
 }
