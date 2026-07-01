@@ -276,6 +276,9 @@ export const getTask: ToolDef = {
             CHECKLIST_TASK_LOOKUP_VALUE +
             " eq " +
             taskId +
+            // Return items in display order (msdyn_projectchecklistorder asc) so
+            // the list here matches the Planner UI and the order they were added.
+            "&$orderby=msdyn_projectchecklistorder asc" +
             "&$top=200",
           method: "GET",
           headers: dvHeaders(),

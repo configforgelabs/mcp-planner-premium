@@ -27,10 +27,10 @@ const existing = (): Map<string, ExistingChecklistItem[]> =>
     [
       TASK.toLowerCase(),
       [
-        { id: ITEM_A, title: "Draft spec", completed: false },
-        { id: ITEM_B, title: "Review", completed: false },
-        { id: ITEM_DUP1, title: "Dupe", completed: false },
-        { id: ITEM_DUP2, title: "Dupe", completed: true },
+        { id: ITEM_A, title: "Draft spec", completed: false, order: 1000 },
+        { id: ITEM_B, title: "Review", completed: false, order: 2000 },
+        { id: ITEM_DUP1, title: "Dupe", completed: false, order: 3000 },
+        { id: ITEM_DUP2, title: "Dupe", completed: true, order: 4000 },
       ],
     ],
   ]);
@@ -44,12 +44,13 @@ const plan = (
 
 describe("checklist entity builders", () => {
   it("checklistCreateEntity builds the proven PssCreate shape (PascalCase task bind)", () => {
-    expect(checklistCreateEntity(TASK, "chk-1", "Do it", true)).toEqual({
+    expect(checklistCreateEntity(TASK, "chk-1", "Do it", true, 1000)).toEqual({
       "@odata.type": "Microsoft.Dynamics.CRM.msdyn_projectchecklist",
       msdyn_projectchecklistid: "chk-1",
       "msdyn_ProjectTaskId@odata.bind": "/msdyn_projecttasks(" + TASK + ")",
       msdyn_name: "Do it",
       msdyn_projectchecklistcompleted: true,
+      msdyn_projectchecklistorder: 1000,
     });
   });
 
@@ -80,12 +81,14 @@ describe("op classification helpers", () => {
 });
 
 describe("planChecklistOps — ADD", () => {
-  it("string shorthand → create (incomplete by default)", () => {
+  it("string shorthand → create (incomplete by default), appended after existing", () => {
+    // Default `existing()` has items up to order 4000, so the new item appends
+    // at 4000 + STEP (5000) rather than colliding with an existing position.
     const { creates, updates, removes } = plan(["Buy milk"]);
     expect(updates).toHaveLength(0);
     expect(removes).toHaveLength(0);
     expect(creates).toEqual([
-      { taskId: TASK, checklistId: "new-1", title: "Buy milk", completed: false },
+      { taskId: TASK, checklistId: "new-1", title: "Buy milk", completed: false, order: 5000 },
     ]);
   });
 
@@ -175,13 +178,25 @@ describe("planChecklistOps — resolution + mixing", () => {
     ).toThrow(/current checklist could not be read/i);
   });
 
-  it("adds need no existing read (map can be empty)", () => {
+  it("adds need no existing read (map can be empty) → order ascends from STEP", () => {
     const { creates } = planChecklistOps(
       [{ taskId: TASK, ops: ["A", "B"] }],
       new Map(),
       seqIds(),
     );
     expect(creates.map((c) => c.title)).toEqual(["A", "B"]);
+    // No existing items known → base 0, so adds ascend 1000, 2000 in list order.
+    expect(creates.map((c) => c.order)).toEqual([1000, 2000]);
+  });
+
+  it("multiple fresh adds get strictly ascending order in list order", () => {
+    const { creates } = planChecklistOps(
+      [{ taskId: TASK, ops: ["First", "Second", "Third"] }],
+      new Map(),
+      seqIds(),
+    );
+    expect(creates.map((c) => c.title)).toEqual(["First", "Second", "Third"]);
+    expect(creates.map((c) => c.order)).toEqual([1000, 2000, 3000]);
   });
 
   it("mixes add + adjust + remove in one task, preserving order/counts", () => {
@@ -198,8 +213,8 @@ describe("planChecklistOps — resolution + mixing", () => {
 
   it("handles ops across multiple tasks independently", () => {
     const ex = new Map<string, ExistingChecklistItem[]>([
-      [TASK.toLowerCase(), [{ id: ITEM_A, title: "Draft spec", completed: false }]],
-      [TASK2.toLowerCase(), [{ id: ITEM_B, title: "Other", completed: false }]],
+      [TASK.toLowerCase(), [{ id: ITEM_A, title: "Draft spec", completed: false, order: 1000 }]],
+      [TASK2.toLowerCase(), [{ id: ITEM_B, title: "Other", completed: false, order: 1000 }]],
     ]);
     const out = planChecklistOps(
       [
@@ -211,8 +226,9 @@ describe("planChecklistOps — resolution + mixing", () => {
     );
     expect(out.updates).toEqual([{ taskId: TASK, id: ITEM_A, completed: true }]);
     expect(out.removes).toEqual([{ taskId: TASK2, id: ITEM_B }]);
+    // "Fresh" appends after TASK2's existing item (order 1000) → 2000.
     expect(out.creates).toEqual([
-      { taskId: TASK2, checklistId: "new-1", title: "Fresh", completed: false },
+      { taskId: TASK2, checklistId: "new-1", title: "Fresh", completed: false, order: 2000 },
     ]);
   });
 });

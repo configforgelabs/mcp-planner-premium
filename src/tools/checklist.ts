@@ -21,13 +21,30 @@ export const CHECKLIST_TASK_BIND = "msdyn_ProjectTaskId@odata.bind";
 // `_msdyn_taskid_value` on msdyn_resourceassignment). Confirmed live 2026-07-01
 // (docs/plans/50 §6) — kept here so any future correction is a one-line change.
 export const CHECKLIST_TASK_LOOKUP_VALUE = "_msdyn_projecttaskid_value";
+// Display order within a task's checklist. A Double the Planner UI (and this
+// server's reads) sort ASCENDING — lower value = higher in the list, mirroring
+// the task-level `msdyn_displaysequence asc` convention used across the readers.
+// Confirmed live 2026-07-01: valid for create AND update (unlike the task
+// display-sequence, which is blocked on create). Without it, new items get the
+// tenant default and render in an arbitrary order. Flip the sort here + in the
+// readers if a tenant ever proves to order descending.
+export const CHECKLIST_ORDER_FIELD = "msdyn_projectchecklistorder";
+// Spacing between successive items. Wide + integral so the UI has room to insert
+// between two of our items, and so an append (existingMax + STEP) clears any
+// fractional values the UI may have written.
+export const CHECKLIST_ORDER_STEP = 1000;
 
-/** The msdyn_projectchecklist CREATE entity for a PssCreateV2 batch. */
+/**
+ * The msdyn_projectchecklist CREATE entity for a PssCreateV2 batch. `order`
+ * sets the sort position (see CHECKLIST_ORDER_FIELD) — pass ascending values in
+ * the intended display order.
+ */
 export function checklistCreateEntity(
   taskId: string,
   checklistId: string,
   title: string,
   completed: boolean,
+  order: number,
 ): Record<string, unknown> {
   return {
     "@odata.type": CHECKLIST_ODATA_TYPE,
@@ -35,6 +52,7 @@ export function checklistCreateEntity(
     [CHECKLIST_TASK_BIND]: "/msdyn_projecttasks(" + taskId + ")",
     [CHECKLIST_NAME_FIELD]: title,
     [CHECKLIST_COMPLETED_FIELD]: completed,
+    [CHECKLIST_ORDER_FIELD]: order,
   };
 }
 
@@ -77,6 +95,9 @@ export interface ExistingChecklistItem {
   id: string;
   title: string;
   completed: boolean;
+  /** Current sort value (CHECKLIST_ORDER_FIELD); used to append new adds after
+   * the last existing item. Defaults to 0 for rows read without the field. */
+  order: number;
 }
 
 export interface ChecklistCreatePlanned {
@@ -84,6 +105,8 @@ export interface ChecklistCreatePlanned {
   checklistId: string;
   title: string;
   completed: boolean;
+  /** Ascending sort value written to CHECKLIST_ORDER_FIELD on create. */
+  order: number;
 }
 export interface ChecklistUpdatePlanned {
   taskId: string;
@@ -190,6 +213,15 @@ export function planChecklistOps(
   for (const { taskId, ops } of tasks) {
     const existing = existingByTask.get(taskId.toLowerCase());
 
+    // New adds sort AFTER the last existing item (append), then ascend among
+    // themselves in input order. When the current checklist wasn't read (pure
+    // adds on a fresh/unread task), base is 0 so the batch starts at STEP.
+    const baseOrder =
+      existing && existing.length
+        ? Math.max(...existing.map((e) => e.order))
+        : 0;
+    let addSeq = 0;
+
     for (const raw of ops) {
       // ADD — string shorthand or a bare {title, completed}.
       if (typeof raw === "string" || !isExistingItemOp(raw)) {
@@ -199,11 +231,13 @@ export function planChecklistOps(
           throw new Error(
             "checklist add for task " + taskId + ": title must not be empty.",
           );
+        addSeq += 1;
         creates.push({
           taskId,
           checklistId: newId(),
           title,
           completed: (obj as { completed?: boolean }).completed === true,
+          order: baseOrder + CHECKLIST_ORDER_STEP * addSeq,
         });
         continue;
       }

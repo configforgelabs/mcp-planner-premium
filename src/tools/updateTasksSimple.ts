@@ -546,11 +546,15 @@ export const updateTasksSimple: ToolDef = {
         "Refused: a checklist entry has remove:true, which deletes the item on apply. Set confirmed:true after an explicit user confirmation.",
       );
 
-    // Read current items for any task with an adjust/remove op (adds need no read).
-    // Fails closed: a failed read rejects the batch rather than guessing.
+    // Read current items for any task with a checklist op. adjust/remove need
+    // them to resolve by id/title; adds need the last item's order so new items
+    // append after it (ordered by msdyn_projectchecklistorder asc). Fails closed
+    // for adjust/remove (rejects rather than guessing); for adds-only a failed
+    // read only forfeits the append offset (items still get an ascending order,
+    // starting from 0) — so it degrades to a warning instead of failing.
     const existingByTask = new Map<string, ExistingChecklistItem[]>();
     for (const ct of checklistTasks) {
-      if (!ct.ops.some(isExistingItemOp)) continue;
+      const hasExistingOp = ct.ops.some(isExistingItemOp);
       const tid = assertGuid(ct.taskId, "taskId");
       const res = await dvReq(
         {
@@ -558,40 +562,51 @@ export const updateTasksSimple: ToolDef = {
             BASE +
             "/" +
             CHECKLIST_ENTITY_SET +
-            "?$select=msdyn_projectchecklistid,msdyn_name,msdyn_projectchecklistcompleted" +
+            "?$select=msdyn_projectchecklistid,msdyn_name,msdyn_projectchecklistcompleted,msdyn_projectchecklistorder" +
             "&$filter=" +
             CHECKLIST_TASK_LOOKUP_VALUE +
             " eq " +
             tid +
+            "&$orderby=msdyn_projectchecklistorder asc" +
             "&$top=200",
           method: "GET",
           headers: dvHeaders(),
         },
         { retry: true },
       );
-      if (res.status >= 400)
-        throw new Error(
+      if (res.status >= 400) {
+        if (hasExistingOp)
+          throw new Error(
+            "Could not read the current checklist for task " +
+              tid +
+              " (" +
+              res.status +
+              "): " +
+              dvErrorMessage(res) +
+              ". adjust/remove need the existing items to resolve by id/title.",
+          );
+        // Adds-only: proceed without the append offset (new items still ordered).
+        warnings.push(
           "Could not read the current checklist for task " +
             tid +
-            " (" +
-            res.status +
-            "): " +
-            dvErrorMessage(res) +
-            ". adjust/remove need the existing items to resolve by id/title.",
+            " to append new items after existing ones; they were added at the top instead.",
         );
+        continue;
+      }
       existingByTask.set(
         tid.toLowerCase(),
         (res.json?.value || []).map((c: any) => ({
           id: c.msdyn_projectchecklistid,
           title: String(c.msdyn_name ?? ""),
           completed: c.msdyn_projectchecklistcompleted === true,
+          order: Number(c.msdyn_projectchecklistorder ?? 0) || 0,
         })),
       );
     }
 
     const planned = planChecklistOps(checklistTasks, existingByTask, randomUUID);
     const checklistCreateEntities = planned.creates.map((c) =>
-      checklistCreateEntity(c.taskId, c.checklistId, c.title, c.completed),
+      checklistCreateEntity(c.taskId, c.checklistId, c.title, c.completed, c.order),
     );
     const checklistUpdateEntities = planned.updates.map((u) =>
       checklistUpdateEntity(u.id, { title: u.title, completed: u.completed }),

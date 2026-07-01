@@ -13,7 +13,7 @@ import { validateAddEntities } from "./addTasks.js";
 import { hasStrippableTagContent } from "./readHelpers.js";
 import { getEntityMetadata } from "../dataverse/metadata.js";
 import { toWrite as columnToWrite, type ColumnMeta } from "../dataverse/columnTypes.js";
-import { checklistCreateEntity } from "./checklist.js";
+import { checklistCreateEntity, CHECKLIST_ORDER_STEP } from "./checklist.js";
 import type { ToolDef } from "./types.js";
 
 const GUID_RE = /^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
@@ -366,6 +366,9 @@ export function buildTaskEntities(
 
     // Checklist items — child rows of the task. msdyn_name is the item title;
     // msdyn_ProjectTaskId is the PascalCase nav-property for the parent task.
+    // Set msdyn_projectchecklistorder ascending in list order so the items
+    // render in the order given (without it, Planner uses an arbitrary default).
+    let chkOrder = 0;
     for (const raw of t.checklist || []) {
       const item: ChecklistItem = typeof raw === "string" ? { title: raw } : raw;
       const title = (item.title || "").trim();
@@ -373,8 +376,9 @@ export function buildTaskEntities(
         throw new Error("Task '" + t.ref + "': checklist item title must not be empty.");
       const chkId = randomUUID();
       checklistIds.push(chkId);
+      chkOrder += CHECKLIST_ORDER_STEP;
       checklistEntities.push(
-        checklistCreateEntity(id, chkId, title, item.completed === true),
+        checklistCreateEntity(id, chkId, title, item.completed === true, chkOrder),
       );
     }
 
