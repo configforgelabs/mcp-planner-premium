@@ -80,6 +80,9 @@ any failure (and `KEEP_PLAN=1`) precisely for this.
   even though it's WRONG on a task.
 - On **checklist** / **label junction**: PascalCase `msdyn_ProjectTaskId@odata.bind`
   (and `msdyn_ProjectLabelId@odata.bind`).
+- On **task attachment** (`msdyn_projecttaskattachment`): PascalCase
+  `msdyn_Task@odata.bind` — and it is the ONLY lookup (no project bind; PSS infers
+  the project from the task). Direct OData create is blocked (must use PSS).
 - Therefore any "wrong bind alias" guard MUST be **entity-type-scoped** — the same
   key is valid on one entity and invalid on another. (We had to fix exactly this.)
 
@@ -151,6 +154,7 @@ any failure (and `KEEP_PLAN=1`) precisely for this.
 | Sprint | ✅ | `add_sprint` + `add_tasks.sprint` (task lookup) |
 | Assignees | ✅ existing team members | `add_tasks.assignees` → `msdyn_resourceassignment` |
 | Labels | ⚠️ assign-only | creation is UI-only |
+| Attachments | ✅ link-only | `add_task_attachment` / `add_tasks.attachments` → `msdyn_projecttaskattachment` (a URL, not file bytes) via PSS |
 | Milestone flag | ❌ | UI-only |
 | Comments | ❌ | Teams/Graph, out of scope |
 | "My overdue tasks" | ✅ | `list_my_tasks` (whoami chain) |
@@ -214,6 +218,21 @@ any failure (and `KEEP_PLAN=1`) precisely for this.
 
 // Sprint (top-level; name + start + finish required). Then set the TASK's lookup:
 //   task: { "msdyn_projectsprint@odata.bind": "/msdyn_projectsprints(<sprintId>)" }
+
+// Task attachment (child of task) — a LINK/reference attachment, NOT file bytes.
+// Direct OData create is blocked (0x80040265 "edit through the Project UI"); must
+// go through PSS (msdyn_PssCreateV2). The ONLY lookup is the task, on the
+// PascalCase nav-property msdyn_Task (lowercase msdyn_task is rejected as an
+// annotation-only property). There is NO project bind — PSS infers it from the
+// task. To attach a real file, upload it to SharePoint/OneDrive and pass the URL.
+{
+  "@odata.type": "Microsoft.Dynamics.CRM.msdyn_projecttaskattachment",
+  "msdyn_projecttaskattachmentid": "<uuid>",
+  "msdyn_name": "Spec PDF",
+  "msdyn_linkuri": "https://contoso.sharepoint.com/sites/proj/Shared%20Documents/spec.pdf",
+  "msdyn_linktype": "Other",          // free-form String type hint (not an option set)
+  "msdyn_Task@odata.bind": "/msdyn_projecttasks(<taskGuid>)"
+}
 ```
 
 ---

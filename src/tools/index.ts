@@ -10,6 +10,7 @@ import { updateTasksSimple } from "./updateTasksSimple.js";
 import { updateTasks } from "./updateTasks.js";
 import { deleteTasks } from "./deleteTasks.js";
 import { assignTask } from "./assignTask.js";
+import { addTaskAttachment } from "./addTaskAttachment.js";
 import { applyChanges } from "./applyChanges.js";
 import { checkStatus } from "./checkStatus.js";
 import { cancelSession } from "./cancelSession.js";
@@ -49,6 +50,7 @@ export const allTools: ToolDef[] = [
   updateTasks,
   deleteTasks,
   assignTask,
+  addTaskAttachment,
   applyChanges,
   checkStatus,
   cancelSession,
@@ -114,6 +116,7 @@ export const toolAnnotations: Record<string, ToolAnnotations> = {
   add_sprint: ADD,
   add_tasks: ADD,
   add_tasks_batch: ADD,
+  add_task_attachment: ADD,
   start_change_session: ADD,
   assign_task: UPDATE,
   // Updates (overwrite existing field values)

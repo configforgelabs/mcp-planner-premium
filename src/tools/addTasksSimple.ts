@@ -10,6 +10,7 @@ import {
   throwIfPssCreateError,
 } from "../dataverse.js";
 import { validateAddEntities } from "./addTasks.js";
+import { buildAttachmentEntities, type AttachmentInput } from "./addTaskAttachment.js";
 import { hasStrippableTagContent } from "./readHelpers.js";
 import type { ToolDef } from "./types.js";
 
@@ -70,6 +71,11 @@ export interface SimpleTask {
    * project team) or a teamMemberId GUID. The person must already be on the
    * project team — an unknown assignee is skipped with a warning. */
   assignees?: string[];
+  /** Link attachments for this task: a URL string, or {uri, name?, linkType?}.
+   * Planner attachments are link/reference attachments (a URL), not file bytes —
+   * upload files to SharePoint/OneDrive and pass the share URL. Each counts
+   * toward the 200-entity batch cap. */
+  attachments?: AttachmentInput[];
 }
 
 /** Resolves a team-member reference to the ids a resource assignment needs. */
@@ -87,6 +93,8 @@ export interface BuiltBatch {
   dependencyIds: string[];
   /** GUIDs of checklist items created (msdyn_projectchecklistid). */
   checklistIds: string[];
+  /** GUIDs of link attachments created (msdyn_projecttaskattachmentid). */
+  attachmentIds: string[];
   /** Non-fatal warnings about caller-supplied values that PSS will silently
    * ignore or override (e.g. effortHours on a summary task). */
   warnings: string[];
@@ -194,9 +202,11 @@ export function buildTaskEntities(
   const checklistEntities: any[] = [];
   const labelEntities: any[] = [];
   const assignmentEntities: any[] = [];
+  const attachmentEntities: any[] = [];
   const milestoneTaskIds: string[] = [];
   const dependencyIds: string[] = [];
   const checklistIds: string[] = [];
+  const attachmentIds: string[] = [];
   const warnings: string[] = [];
 
   for (const t of ordered) {
@@ -365,14 +375,31 @@ export function buildTaskEntities(
         asgEnt["msdyn_bookableresourceid@odata.bind"] = "/bookableresources(" + member.bookableResourceId + ")";
       assignmentEntities.push(asgEnt);
     }
+
+    // Link attachments — child msdyn_projecttaskattachment rows. These are
+    // link/reference attachments (a URL), not file bytes. The shared pure builder
+    // emits the proven payload (PascalCase msdyn_Task bind, default linktype).
+    if ((t.attachments?.length ?? 0) > 0) {
+      const builtAtt = buildAttachmentEntities(id, t.attachments!);
+      for (const att of builtAtt.entities) attachmentEntities.push(att);
+      for (const a of builtAtt.attached) attachmentIds.push(a.attachmentId);
+    }
   }
 
   return {
-    entities: [...taskEntities, ...depEntities, ...checklistEntities, ...labelEntities, ...assignmentEntities],
+    entities: [
+      ...taskEntities,
+      ...depEntities,
+      ...checklistEntities,
+      ...labelEntities,
+      ...assignmentEntities,
+      ...attachmentEntities,
+    ],
     refToId,
     milestoneTaskIds,
     dependencyIds,
     checklistIds,
+    attachmentIds,
     warnings,
   };
 }
@@ -448,6 +475,21 @@ const taskSchema = z.object({
     .optional()
     .describe(
       "Assign project-team members to this task: member name (resolved against the plan's project team) or teamMemberId GUIDs (from list_team_members). The person must already be on the project team — unknown assignees are skipped with a warning.",
+    ),
+  attachments: z
+    .array(
+      z.union([
+        z.string(),
+        z.object({
+          uri: z.string(),
+          name: z.string().optional(),
+          linkType: z.string().optional(),
+        }),
+      ]),
+    )
+    .optional()
+    .describe(
+      "Link attachments for this task: a URL string, or {uri, name?, linkType?} objects. Planner attachments are LINKS (URLs), not uploaded files — upload a file to SharePoint/OneDrive and pass its share URL. name defaults to the URL's last segment; linkType defaults to \"Other\". Each counts toward the 200-entity batch cap.",
     ),
 });
 
@@ -706,6 +748,7 @@ export const addTasksSimple: ToolDef = {
       milestoneTaskIds: built.milestoneTaskIds,
       dependencyIds: built.dependencyIds,
       checklistIds: built.checklistIds.length > 0 ? built.checklistIds : undefined,
+      attachmentIds: built.attachmentIds.length > 0 ? built.attachmentIds : undefined,
       warnings: built.warnings.length > 0 ? built.warnings : undefined,
       response: response.json || {},
       note:

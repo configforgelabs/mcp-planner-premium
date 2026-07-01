@@ -42,6 +42,7 @@ const WRITE_TOOL_NAMES = new Set([
   "apply_changes",
   "cancel_change_session",
   "assign_task",
+  "add_task_attachment",
 ]);
 
 function noConstraint(): ToolFilterEnv {
@@ -87,12 +88,12 @@ describe("filterTools — READ_ONLY_MODE", () => {
     }
   });
 
-  it("places all 12 write/session tools in excluded with reason 'read-only mode'", () => {
+  it("places all 13 write/session tools in excluded with reason 'read-only mode'", () => {
     const { excluded } = filterTools(allTools, toolAnnotations, { readOnly: true });
     for (const name of WRITE_TOOL_NAMES) {
       expect(excluded[name]).toBe("read-only mode");
     }
-    expect(Object.keys(excluded)).toHaveLength(12);
+    expect(Object.keys(excluded)).toHaveLength(13);
   });
 
   it("readOnlyNames.size equals the read-only tool count", () => {

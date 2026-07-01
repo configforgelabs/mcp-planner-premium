@@ -185,3 +185,23 @@ export async function verifyDependencyCount(projectId: string, bearer: string): 
   );
   return data["@odata.count"] ?? 0;
 }
+
+/**
+ * Return the link attachments on a specific task (name + uri + type), read
+ * directly from Dataverse. Used by the attachment write scenario to verify
+ * add_task_attachment / add_tasks attachments persisted with the right values.
+ */
+export async function verifyTaskAttachments(
+  taskId: string,
+  bearer: string,
+): Promise<{ name: string; uri: string; linkType: string }[]> {
+  const data = await dvGet(
+    `/msdyn_projecttaskattachments?$select=msdyn_name,msdyn_linkuri,msdyn_linktype&$filter=_msdyn_task_value eq ${taskId}`,
+    bearer,
+  );
+  return (data.value ?? []).map((r: any) => ({
+    name: r.msdyn_name,
+    uri: r.msdyn_linkuri,
+    linkType: r.msdyn_linktype,
+  }));
+}

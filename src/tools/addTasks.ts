@@ -16,6 +16,7 @@ const ALLOWED = [
   "Microsoft.Dynamics.CRM.msdyn_projectsprint",
   "Microsoft.Dynamics.CRM.msdyn_projectchecklist",
   "Microsoft.Dynamics.CRM.msdyn_projecttasktolabel",
+  "Microsoft.Dynamics.CRM.msdyn_projecttaskattachment",
 ];
 
 // Engine-managed fields the PSS API rejects on CREATE (ScheduleAPI-AV-0001).
@@ -54,6 +55,12 @@ const TASK_BIND_ALIASES: Record<string, string> = {
 const DEP_BIND_ALIASES: Record<string, string> = {
   "msdyn_predecessortask@odata.bind": "msdyn_PredecessorTask@odata.bind",
   "msdyn_successortask@odata.bind": "msdyn_SuccessorTask@odata.bind",
+};
+// On msdyn_projecttaskattachment the task lookup binds on the PascalCase schema
+// name msdyn_Task. The lowercase logical name is rejected by Dataverse as an
+// annotation-only property with no value; teach the correct key.
+const ATTACHMENT_BIND_ALIASES: Record<string, string> = {
+  "msdyn_task@odata.bind": "msdyn_Task@odata.bind",
 };
 
 // Dependency link types - option-set values of msdyn_projecttaskdependencylinktype.
@@ -122,7 +129,9 @@ export function validateAddEntities(entities: any[]): void {
         ? TASK_BIND_ALIASES
         : t === "Microsoft.Dynamics.CRM.msdyn_projecttaskdependency"
           ? DEP_BIND_ALIASES
-          : null;
+          : t === "Microsoft.Dynamics.CRM.msdyn_projecttaskattachment"
+            ? ATTACHMENT_BIND_ALIASES
+            : null;
     if (aliasMap) {
       for (const wrong in aliasMap) {
         if (Object.prototype.hasOwnProperty.call(ent, wrong)) {
@@ -269,6 +278,26 @@ export function validateAddEntities(entities: any[]): void {
           "entities[" +
             i +
             "] (dependency): msdyn_projecttaskdependencylinklag must be a number (lag in minutes).",
+        );
+      }
+    }
+    if (t === "Microsoft.Dynamics.CRM.msdyn_projecttaskattachment") {
+      // Link/reference attachment. The only lookup is the task, bound on the
+      // PascalCase nav-property msdyn_Task@odata.bind (the lowercase alias is
+      // caught above). name + uri are the content; linktype defaults via the
+      // ergonomic builder so it is not required on the raw path.
+      const missing: string[] = [];
+      if (!ent.msdyn_name) missing.push("msdyn_name");
+      if (!ent.msdyn_linkuri) missing.push("msdyn_linkuri");
+      if (!ent["msdyn_Task@odata.bind"]) missing.push("msdyn_Task@odata.bind");
+      if (missing.length) {
+        throw new Error(
+          "entities[" +
+            i +
+            "] (attachment): missing required field(s): " +
+            missing.join(", ") +
+            ". A task attachment needs msdyn_name, msdyn_linkuri (the URL), and " +
+            "msdyn_Task@odata.bind = /msdyn_projecttasks(<guid>) (PascalCase nav-property).",
         );
       }
     }

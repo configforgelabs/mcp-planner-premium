@@ -29,6 +29,7 @@ import { mcpCall, mcpInitialize, mcpToolNames } from "./mcpClient.js";
 import {
   verifyAssignmentCount,
   verifyDependencyCount,
+  verifyTaskAttachments,
   verifyTaskDeleted,
   verifyTaskField,
 } from "./verify.js";
@@ -191,6 +192,8 @@ async function main(): Promise<void> {
       "read-only server keeps read tools");
     ok(names.includes("list_user_tasks") && names.includes("find_team_member_across_plans"),
       "read-only server advertises the new member-info/user-task read tools");
+    ok(!names.includes("add_task_attachment"),
+      "read-only server hides add_task_attachment (a write tool)");
     const blocked = await mcpCall(roUrl, "create_plan", { subject: "ZZ-should-be-blocked" }, bearer);
     ok(blocked.isError === true, "create_plan rejected under READ_ONLY_MODE",
       JSON.stringify(blocked.content).slice(0, 80));
@@ -290,6 +293,42 @@ async function runWriteTier(bearer: string, port: number): Promise<void> {
     ok(t2gone, "delete cascade → successor task deleted (OData 404)");
     ok(depCountAfter < depCountBefore, "delete cascade → dependency auto-removed", `deps ${depCountBefore}→${depCountAfter}`);
     createdTaskIds.splice(createdTaskIds.indexOf(t2), 1);
+
+    // ── task attachments (link/reference attachments) ──────────────────────
+    // (a) standalone add_task_attachment on the surviving task t1: one explicit
+    //     {uri,name,linkType} and one bare URL (name derived from the URL).
+    const att = await call(url, "add_task_attachment", {
+      projectId,
+      taskId: t1,
+      attachments: [
+        { uri: "https://contoso.sharepoint.com/sites/p/Shared%20Documents/Spec.pdf", name: "Spec", linkType: "Pdf" },
+        "https://contoso.sharepoint.com/sites/p/notes.txt",
+      ],
+    }, bearer);
+    ok(att?.ok === true && Array.isArray(att.attachmentIds) && att.attachmentIds.length === 2,
+      "add_task_attachment → applied 2 link attachments", `ids=${att.attachmentIds?.length ?? "?"}`);
+    const liveAtts = await verifyTaskAttachments(t1, bearer);
+    ok(liveAtts.length === 2, "OData: 2 attachments on the task", `count=${liveAtts.length}`);
+    ok(liveAtts.some((a) => (a.uri ?? "").includes("Spec.pdf") && a.name === "Spec" && a.linkType === "Pdf"),
+      "OData: explicit name/linkType attachment persisted");
+    ok(liveAtts.some((a) => a.name === "notes.txt"),
+      "OData: bare-URL attachment derived its name from the URL");
+
+    // (b) add_tasks attachments field: a new task carrying an inline attachment,
+    //     created + attached in ONE PSS batch.
+    s = await call(url, "start_change_session", { projectId, description: "task with attachment" }, bearer);
+    const refs2 = await call(url, "add_tasks", {
+      operationSetId: s.operationSetId, projectId,
+      tasks: [{ ref: "T3", subject: "Task with attachment", bucket: "Sprint 1", attachments: ["https://contoso.sharepoint.com/sites/p/design.fig"] }],
+    }, bearer);
+    const t3 = refs2.taskRefs?.T3 as string;
+    if (t3) createdTaskIds.push(t3);
+    ok(Array.isArray(refs2.attachmentIds) && refs2.attachmentIds.length === 1,
+      "add_tasks returns attachmentIds for the inline attachment", `ids=${refs2.attachmentIds?.length ?? "?"}`);
+    await call(url, "apply_changes", { operationSetId: s.operationSetId }, bearer);
+    const t3Atts = await verifyTaskAttachments(t3, bearer);
+    ok(t3Atts.length === 1 && t3Atts[0].name === "design.fig",
+      "OData: add_tasks inline attachment persisted on the new task (same-batch task+attachment)", `count=${t3Atts.length}`);
   } catch (e) {
     fail++;
     fails.push(`write tier threw: ${e instanceof Error ? e.message : String(e)}`);

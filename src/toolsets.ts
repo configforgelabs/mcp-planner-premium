@@ -48,8 +48,8 @@ export const TOOLSETS: Record<string, readonly string[]> = {
     "update_tasks",
     "update_tasks_batch",
     "delete_tasks_batch",
-    // Forward-references — not yet registered; added here for later-wave integration.
     "assign_task",
+    "add_task_attachment",
   ],
   analytics: [
     "get_plan_summary",

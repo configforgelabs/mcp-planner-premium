@@ -86,7 +86,7 @@ means the server is not dangerous even when used from a host with no skill loade
 | `add_bucket` | Add a bucket to a plan |
 | `add_sprint` | Add a sprint (name + start + finish) to a plan |
 | `start_change_session` | Open a change session; returns `operationSetId` |
-| `add_tasks` | Add tasks (+ checklist, sprint, labels, assignees) — ergonomic, **preferred** |
+| `add_tasks` | Add tasks (+ checklist, sprint, labels, assignees, attachments) — ergonomic, **preferred** |
 | `add_tasks_batch` | Add tasks — raw OData, advanced escape hatch |
 | `update_tasks` | Update tasks — ergonomic, **preferred** |
 | `update_tasks_batch` | Update tasks — raw OData, advanced escape hatch |
@@ -114,6 +114,7 @@ means the server is not dangerous even when used from a host with no skill loade
 | `get_schedule_health` | Schedule-risk rollup: overdue, at-risk, blocked, milestones, slipping summaries — read |
 | `get_resource_workload` | Per-team-member assigned-task count, effort hours, and overdue count — read |
 | `assign_task` | Assign or unassign a project-team member on an existing task (requires `confirmed=true` to unassign) — destructive |
+| `add_task_attachment` | Attach link/reference attachments (URLs) to an existing task; self-contained (own session + apply) — additive |
 
 ## Ergonomic vs. raw task creation
 
@@ -368,6 +369,8 @@ Known gaps and planned improvements. Contributions welcome.
 - ~~**Resource assignments.**~~ *Done.* `add_tasks` accepts `assignees` (project-team member name or teamMemberId, resolved against `msdyn_projectteam`) and creates `msdyn_resourceassignment` rows. The new `assign_task` tool assigns or unassigns members on an existing task without re-creating it. `start`/`finish` are blocked on create (PSS derives them from the task).
 
 - **Checklists** are supported via `add_tasks` `checklist`. **Labels**: `add_tasks` `labels` *assigns* existing plan labels, but label **creation** is UI-only — `msdyn_projectlabel` rejects both direct OData create ("edit through the Project UI") and PSS create. Unknown labels are skipped with a warning.
+
+- ~~**Task attachments.**~~ *Done.* Planner-Premium task attachments are **link/reference attachments** (`msdyn_projecttaskattachment`: a URL `msdyn_linkuri` + display `msdyn_name` + free-form `msdyn_linktype`), **not** uploaded file bytes — to attach a real file, upload it to SharePoint/OneDrive first and pass the share URL. The new `add_task_attachment` tool attaches one or more links to an existing task (self-contained: own session + apply + poll), and `add_tasks` accepts an `attachments` field to attach at creation time. Direct OData create of this entity is blocked by the platform (`0x80040265` "edit through the Project UI") — creation goes through PSS (`msdyn_PssCreateV2`). The only lookup is the task, bound on the **PascalCase** `msdyn_Task@odata.bind` (no project bind — PSS infers the project from the task). Embedding raw file bytes (Dataverse Notes / `annotation.documentbody`) is **not** done here: those rows are a parallel store the Planner/Project UI does not surface as attachments.
 
 - **Milestone flag.** `msdyn_ismilestone` is engine-managed and rejected by PSS on both create and update (`ScheduleAPI-AV-0002`). No API path is currently known. Investigate whether a different Dataverse action exposes it; otherwise this remains UI-only.
 
