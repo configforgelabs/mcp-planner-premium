@@ -13,11 +13,15 @@
  *   - Lookups:         EntityDefinitions(LogicalName='<entity>')/ManyToOneRelationships?$select=ReferencingAttribute,ReferencingEntityNavigationPropertyName,ReferencedEntity
  *   - Entity sets:     EntityDefinitions(LogicalName='<target>')?$select=EntitySetName
  *
- * CUSTOM-COLUMN GATE (corrected per the proven schema-scout spec): a column is
- * eligible for the custom-column codec path ONLY if its logical name does NOT
- * start with "msdyn_" (prefix discipline). On this class of entity, nearly
- * every standard msdyn_ field reports IsCustomAttribute:true, so that flag is
- * NOT usable as the gate — it is carried on ColumnMeta only as a weak hint.
+ * CUSTOM-COLUMN GATE: a column is eligible for the custom-column codec path
+ * ONLY if BOTH (a) its logical name does NOT start with "msdyn_" (prefix
+ * discipline) AND (b) it reports IsCustomAttribute === true. Neither check
+ * alone is sufficient: nearly every standard managed msdyn_ field reports
+ * IsCustomAttribute:true (so the flag alone would over-include managed
+ * fields — the prefix excludes those), while standard SYSTEM columns like
+ * createdby/ownerid/statecode/versionnumber are non-msdyn_ but report
+ * IsCustomAttribute:false (so the prefix alone would over-include those —
+ * the flag excludes them).
  *
  * Graceful degradation:
  *   - Attribute-list 403/error -> throws (caller decides read-degrade vs.
@@ -215,8 +219,13 @@ async function fetchEntityMetadata(entity: string): Promise<EntityMetadata> {
     );
   }
 
-  const rawRows: RawAttributeMetadata[] = (res.json?.value ?? []).filter((row: RawAttributeMetadata) =>
-    isCustomColumnName(row.LogicalName),
+  // Gate: non-msdyn_ prefix AND IsCustomAttribute === true. The prefix alone
+  // is not enough — standard system columns (createdby, ownerid, statecode,
+  // versionnumber, ...) also lack the msdyn_ prefix but report
+  // IsCustomAttribute:false, so without this second check they leaked through
+  // as false "custom" columns.
+  const rawRows: RawAttributeMetadata[] = (res.json?.value ?? []).filter(
+    (row: RawAttributeMetadata) => isCustomColumnName(row.LogicalName) && row.IsCustomAttribute === true,
   );
 
   // Lazily fan out to type-specific casts, only for columns that need them.

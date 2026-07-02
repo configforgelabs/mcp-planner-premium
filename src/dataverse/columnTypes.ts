@@ -10,11 +10,15 @@
  * a real tenant by the schema-scout probe (see docs/plans/40-custom-columns.md
  * and the scout spec). This module implements the PROVEN shapes:
  *
- * 1. "Custom" is NOT determined by `IsCustomAttribute` — on this tenant nearly
- *    every standard `msdyn_` field reports `IsCustomAttribute:true`. The custom
- *    gate lives OUTSIDE this module (prefix discipline: logical name does not
- *    start with `msdyn_`), applied by the metadata layer / calling tools.
- *    `isCustom` is carried on ColumnMeta only as a weak hint, never load-bearing.
+ * 1. "Custom" is NOT determined by `IsCustomAttribute` ALONE — on this tenant
+ *    nearly every standard `msdyn_` field reports `IsCustomAttribute:true`, so
+ *    the flag alone would over-include managed fields. The actual gate lives
+ *    OUTSIDE this module (metadata layer): non-`msdyn_` prefix AND
+ *    `IsCustomAttribute === true`. The prefix alone is also insufficient —
+ *    standard system columns (createdby, ownerid, statecode, ...) are
+ *    non-`msdyn_` but report `IsCustomAttribute:false`. `isCustom` on
+ *    ColumnMeta reflects the raw flag; by the time a column reaches this
+ *    module it has already passed the full gate upstream.
  * 2. DateOnly vs. DateTime is decided by the top-level `Format` field
  *    ("DateOnly" vs "DateAndTime"), NOT `DateTimeBehavior` (which is only ever
  *    "UserLocal" or "TimeZoneIndependent" — it never signals date-only).
@@ -60,7 +64,11 @@ export interface ColumnMeta {
   /** e.g. "new_RiskScore" — casing hint only, never used as a write key. */
   schemaName: string;
   type: NormalizedType;
-  /** IsCustomAttribute — weak hint only. NOT the custom-column gate. */
+  /**
+   * Raw IsCustomAttribute flag. Part of the custom-column gate (combined with
+   * the non-msdyn_ prefix check applied upstream in the metadata layer before
+   * a column ever reaches this module) — not load-bearing on its own here.
+   */
   isCustom: boolean;
   isValidForCreate: boolean;
   isValidForUpdate: boolean;

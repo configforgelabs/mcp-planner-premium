@@ -30,7 +30,7 @@ export const describeColumns: ToolDef = {
   name: "describe_columns",
   title: "Describe Columns",
   description:
-    "Returns deep detail for named customer-added Dataverse columns on the plan (project) or task entity: normalized type, create/update validity, computed flag, option-set values+labels (picklist/multiselect), date format, and lookup navigation-property/target-entity/entity-set info. A superset of describe_option_set for the custom-column case (describe_option_set still works for standard fields). Read-only. On-demand by default; returns ok:false only if the operator disabled custom columns (CUSTOM_COLUMNS_MODE=off).",
+    "Returns deep detail for named customer-added Dataverse columns on the plan (project) or task entity: normalized type, create/update validity, computed flag, option-set values+labels (picklist/multiselect), date format, and lookup navigation-property/target-entity/entity-set info. A superset of describe_option_set for the custom-column case (describe_option_set still works for standard fields). Read-only. On-demand by default; returns ok:false only if the operator disabled custom columns (CUSTOM_COLUMNS_MODE=off). Dataverse columns only; fields created in the Planner app live in Microsoft Graph and won't appear here — use a Graph tool for those.",
   inputSchema: {
     entity: z.enum(["project", "task"]).describe("Which entity to inspect: 'project' (a plan) or 'task'."),
     columns: z

@@ -170,6 +170,14 @@ The other 9 tools already take plain scalars, so they need no wrapper.
 
 ## Custom Dataverse columns
 
+> **Dataverse only, not the Planner app.** This section covers columns that
+> exist as **Dataverse columns** on the `msdyn_project` / `msdyn_projecttask`
+> tables (e.g. added via Power Apps). Custom fields created in the
+> **Microsoft Planner app itself** (the Planner web "Edit field" UI) live in
+> the Planner/Graph service, are not Dataverse columns, and are **not visible
+> to this server** — `list_custom_columns` will not return them. To read or
+> write those fields, use a Microsoft Graph-based tool/MCP instead.
+
 Customers on full Project Plan 3/5 licenses often add **custom columns**
 (publisher-prefixed, e.g. `new_riskscore`, `contoso_category`) to the plan
 (`msdyn_project`) or task (`msdyn_projecttask`) entity. This server reads and

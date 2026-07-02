@@ -116,6 +116,33 @@ describe("getEntityMetadata — attribute parse", () => {
     expect(meta.columns.get("new_riskscore")!.type).toBe("int");
   });
 
+  it("excludes non-msdyn_ standard SYSTEM columns (IsCustomAttribute:false) — the leak fix", async () => {
+    dvReqMock.mockImplementation((req: { url: string }) => {
+      if (ATTRIBUTES_URL_RE.test(req.url)) {
+        return jsonOk({
+          value: [
+            // Standard Dataverse system columns: non-msdyn_ prefix, but
+            // IsCustomAttribute:false — must NOT be treated as custom.
+            attrRow({ LogicalName: "createdby", IsCustomAttribute: false }),
+            attrRow({ LogicalName: "ownerid", IsCustomAttribute: false }),
+            attrRow({ LogicalName: "statecode", IsCustomAttribute: false }),
+            attrRow({ LogicalName: "versionnumber", IsCustomAttribute: false }),
+            // A real custom column: non-msdyn_ prefix AND IsCustomAttribute:true.
+            attrRow({ LogicalName: "new_riskscore", IsCustomAttribute: true }),
+          ],
+        });
+      }
+      throw new Error("unexpected request: " + req.url);
+    });
+
+    const meta = await getEntityMetadata("msdyn_projecttask");
+    expect(meta.columns.has("createdby")).toBe(false);
+    expect(meta.columns.has("ownerid")).toBe(false);
+    expect(meta.columns.has("statecode")).toBe(false);
+    expect(meta.columns.has("versionnumber")).toBe(false);
+    expect(meta.columns.has("new_riskscore")).toBe(true);
+  });
+
   it("parses IsValidForCreate/Update, SourceType/AttributeOf into isComputed", async () => {
     dvReqMock.mockImplementation((req: { url: string }) => {
       if (ATTRIBUTES_URL_RE.test(req.url)) {
